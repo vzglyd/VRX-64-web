@@ -1,0 +1,48 @@
+[package]
+name = "vzglyd-web"
+version = "0.1.0"
+edition = "2024"
+description = "Web host for VZGLYD display engine (WebGPU + WASM)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vzglyd/vzglyd"
+rust-version = "1.85"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "vzglyd_web"
+path = "src/lib.rs"
+
+[profile.release]
+lto = true
+opt-level = "z"
+
+[dependencies]
+# Kernel
+vzglyd-kernel = { path = "../vzglyd-kernel" }
+vzglyd-slide = { git = "https://github.com/vzglyd/vzglyd-slide", features = ["gpu"] }
+
+# WASM bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+
+# Web APIs
+web-sys = { version = "0.3", features = [
+    "Window", "Navigator", "Gpu", "GpuAdapter", "GpuDevice",
+    "GpuQueue", "GpuTexture", "GpuBuffer", "GpuRenderPipeline",
+    "GpuCommandEncoder", "GpuRenderPassEncoder", "GpuCanvasContext",
+    "GpuBindGroupLayout", "GpuBindGroup", "GpuPipelineLayout",
+    "GpuShaderModule", "GpuSampler", "GpuTextureView",
+    "HtmlCanvasElement", "Blob", "Request", "Response", "Headers",
+    "RequestInit", "RequestMode", "ReadableStream"
+]}
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+
+# Utilities
+log = "0.4"
+wasm-logger = "0.2"
+once_cell = "1"

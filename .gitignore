@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+pkg/
+
+# Build artifacts
+*.so
+*.dll
+*.dylib
+*.exe
+*.wasm
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Node
+node_modules/

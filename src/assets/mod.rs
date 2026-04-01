@@ -1,0 +1,1 @@
+//! Asset loading via fetch().
