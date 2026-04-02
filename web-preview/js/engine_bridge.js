@@ -120,6 +120,8 @@ export class EngineBridge {
     this._slideName = '';
     this._manifestName = '';
     this._lastError = null;
+    this._compiledSceneMeshes = [];
+    this._compiledSceneCameraPath = null;
   }
 
   async loadBundle(bundleBytes, runtimeOptions = null) {
@@ -169,10 +171,19 @@ export class EngineBridge {
         console.log('[vzglyd] Adding', this._compiledSceneMeshes.length, 'compiled meshes to spec');
         
         for (const mesh of this._compiledSceneMeshes) {
+          // Ensure vertices have tex_coords for Screen2D mode
+          const vertices = mesh.vertices.map(v => ({
+            position: v.position,
+            normal: v.normal,
+            color: v.color,
+            mode: v.mode,
+            tex_coords: v.tex_coords || [0, 0], // Default UVs if not present
+          }));
+          
           // Add to static_meshes
           spec.static_meshes.push({
             label: mesh.label || mesh.id,
-            vertices: mesh.vertices,
+            vertices,
             indices: mesh.indices,
           });
           
@@ -187,6 +198,12 @@ export class EngineBridge {
         }
         
         console.log('[vzglyd] Spec now has', spec.static_meshes.length, 'meshes and', spec.draws.length, 'draws');
+      }
+      
+      // Apply camera path from GLB if available
+      if (this._compiledSceneCameraPath) {
+        console.log('[vzglyd] Applying camera path from GLB:', this._compiledSceneCameraPath);
+        spec.camera_path = this._compiledSceneCameraPath;
       }
       
       const renderer = new VzglydRenderer(this._canvas, spec);
@@ -288,8 +305,8 @@ export class EngineBridge {
         const meshKey = mesh.id || mesh.label || scenePath;
         console.log('[vzglyd] storing mesh asset with key:', meshKey);
         meshAssets.set(meshKey, new Uint8Array(encodedMesh));
-        
-        // Store mesh data for spec patching
+
+        // Store mesh data for spec integration
         this._compiledSceneMeshes.push({
           id: mesh.id,
           label: mesh.label,
@@ -297,6 +314,12 @@ export class EngineBridge {
           indices: mesh.indices,
           pipeline: mesh.pipeline,
         });
+      }
+
+      // Store camera_path from compiled scene (will be applied to spec later)
+      if (compiledScene.camera_path) {
+        this._compiledSceneCameraPath = compiledScene.camera_path;
+        console.log('[vzglyd] Found camera path with', compiledScene.camera_path.keyframes.length, 'keyframes');
       }
 
       // Encode the scene anchor set
@@ -340,6 +363,8 @@ export class EngineBridge {
     this._sidecarHost = null;
     this._loaded = false;
     this._lastTimestampMs = null;
+    this._compiledSceneMeshes = [];
+    this._compiledSceneCameraPath = null;
   }
 
   stats() {
