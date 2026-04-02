@@ -17,6 +17,10 @@ const WASI_ENOSYS = 52;
 
 const CLOCK_REALTIME = 0;
 const CLOCK_MONOTONIC = 1;
+const EVENTTYPE_CLOCK = 0;
+const SUBCLOCKFLAG_ABSTIME = 1;
+const WASI_SUBSCRIPTION_SIZE = 48;
+const WASI_EVENT_SIZE = 32;
 
 const HOST_ERROR = -1;
 const HOST_BUFFER_TOO_SMALL = -2;
@@ -37,6 +41,7 @@ class BaseWasmHost {
     this._memory = null;
     this._startMs = performance.now();
     this._channelState = options.channelState ?? emptyChannelState();
+    this._blockingSleep = options.blockingSleep ?? null;
   }
 
   setInstance(instance) {
@@ -63,6 +68,13 @@ class BaseWasmHost {
   _writeBytes(ptr, data) {
     this._memU8().set(data, ptr);
     return data.length;
+  }
+
+  _clockTimeNs(clockId) {
+    if (clockId === CLOCK_MONOTONIC) {
+      return BigInt(Math.round((performance.now() - this._startMs) * 1_000_000));
+    }
+    return BigInt(Math.round(Date.now() * 1_000_000));
   }
 
   _buildWasiBase() {
@@ -94,13 +106,7 @@ class BaseWasmHost {
       },
 
       clock_time_get(clockId, _precisionLo, _precisionHi, outPtr) {
-        let ns;
-        if (clockId === CLOCK_MONOTONIC) {
-          ns = BigInt(Math.round((performance.now() - self._startMs) * 1_000_000));
-        } else {
-          ns = BigInt(Math.round(Date.now() * 1_000_000));
-        }
-        self._memView().setBigUint64(outPtr, ns, true);
+        self._memView().setBigUint64(outPtr, self._clockTimeNs(clockId), true);
         return WASI_ESUCCESS;
       },
 
@@ -193,8 +199,51 @@ class BaseWasmHost {
         return WASI_EBADF;
       },
 
-      poll_oneoff(_in, _out, _nsubscriptions, _neventsPtr) {
-        return WASI_ENOSYS;
+      poll_oneoff(inPtr, outPtr, nsubscriptions, neventsPtr) {
+        if (!self._blockingSleep) return WASI_ENOSYS;
+        if (inPtr < 0 || outPtr < 0 || nsubscriptions < 0 || neventsPtr < 0) {
+          return WASI_EINVAL;
+        }
+
+        const count = nsubscriptions >>> 0;
+        const view = self._memView();
+        const mem = self._memU8();
+        let waitMs = 0;
+
+        for (let i = 0; i < count; i++) {
+          const subscriptionPtr = (inPtr >>> 0) + i * WASI_SUBSCRIPTION_SIZE;
+          const eventType = view.getUint8(subscriptionPtr + 8);
+          if (eventType !== EVENTTYPE_CLOCK) {
+            return WASI_ENOSYS;
+          }
+
+          const clockId = view.getUint32(subscriptionPtr + 16, true);
+          const timeoutNs = view.getBigUint64(subscriptionPtr + 24, true);
+          const flags = view.getUint16(subscriptionPtr + 40, true);
+          let relativeNs = timeoutNs;
+          if ((flags & SUBCLOCKFLAG_ABSTIME) !== 0) {
+            const nowNs = self._clockTimeNs(clockId);
+            relativeNs = timeoutNs > nowNs ? timeoutNs - nowNs : 0n;
+          }
+          const currentWaitMs = Number(
+            relativeNs / 1_000_000n + (relativeNs % 1_000_000n === 0n ? 0n : 1n),
+          );
+          waitMs = i === 0 ? currentWaitMs : Math.min(waitMs, currentWaitMs);
+        }
+
+        self._blockingSleep(waitMs);
+
+        for (let i = 0; i < count; i++) {
+          const subscriptionPtr = (inPtr >>> 0) + i * WASI_SUBSCRIPTION_SIZE;
+          const eventPtr = (outPtr >>> 0) + i * WASI_EVENT_SIZE;
+          mem.set(mem.slice(subscriptionPtr, subscriptionPtr + 8), eventPtr);
+          mem.fill(0, eventPtr + 8, eventPtr + WASI_EVENT_SIZE);
+          view.setUint16(eventPtr + 8, WASI_ESUCCESS, true);
+          view.setUint8(eventPtr + 10, EVENTTYPE_CLOCK);
+        }
+
+        view.setUint32(neventsPtr >>> 0, count, true);
+        return WASI_ESUCCESS;
       },
 
       sched_yield() {
@@ -540,8 +589,9 @@ export class VzglydSidecarHost extends BaseWasmHost {
     super(options);
     this._networkPolicy = options.networkPolicy ?? 'any_https';
     this._endpointMap = options.endpointMap ?? {};
-    this._nextFd = 100;
-    this._sockets = new Map();
+    this._onChannelPush = options.onChannelPush ?? null;
+    this._onLog = options.onLog ?? null;
+    this._lastNetworkResponse = null;
   }
 
   run() {
@@ -569,154 +619,121 @@ export class VzglydSidecarHost extends BaseWasmHost {
     }
   }
 
-  _writeU32(ptr, value) {
-    this._memView().setUint32(ptr >>> 0, value >>> 0, true);
-  }
-
-  _writeU16(ptr, value) {
-    this._memView().setUint16(ptr >>> 0, value >>> 0, true);
-  }
-
-  _readIovecs(iovecsPtr, iovecsLen) {
-    const view = this._memView();
-    const regions = [];
-    for (let i = 0; i < iovecsLen; i++) {
-      const base = view.getUint32((iovecsPtr >>> 0) + i * 8, true);
-      const len = view.getUint32((iovecsPtr >>> 0) + i * 8 + 4, true);
-      regions.push([base, len]);
+  _logSidecar(message) {
+    if (this._onLog) {
+      this._onLog(message);
+      return;
     }
-    return regions;
+    console.log('[vzglyd][sidecar]', message);
   }
 
-  _decodeSockAddr(addrPtr, addrLen) {
-    const bytes = this._readBytes(addrPtr >>> 0, addrLen >>> 0);
-    if (bytes.length < 8) {
-      throw new Error('invalid sockaddr bytes');
+  _emitChannelPush(bytes) {
+    if (this._onChannelPush) {
+      this._onChannelPush(bytes);
+      return;
     }
-    const port = (bytes[2] << 8) | bytes[3];
-    const ip = `${bytes[4]}.${bytes[5]}.${bytes[6]}.${bytes[7]}`;
-    return { ip, port };
+    this._channelState.latest = bytes;
+    this._channelState.dirty = true;
   }
 
-  _socketEndpointFor(ip, port) {
-    const key = `${ip}:${port}`;
-    const mapped = this._endpointMap[key];
+  _requestEndpointFor(host, path) {
+    const mapped = this._endpointMap[host] ?? this._endpointMap[`${host}:443`];
     if (mapped) {
-      return mapped;
+      return new URL(path, mapped).toString();
     }
     if (this._networkPolicy === 'any_https') {
-      return `https://${ip}:${port}/`;
+      return `https://${host}${path}`;
     }
     return null;
   }
 
-  _syncHttpPost(url, body) {
+  _syncHttpGet(url, headers) {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', url, false);
+    xhr.open('GET', url, false);
     xhr.responseType = 'arraybuffer';
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-    xhr.send(body);
-    if (xhr.status >= 200 && xhr.status < 300) {
-      return new Uint8Array(xhr.response ?? new ArrayBuffer(0));
+    for (const header of headers) {
+      xhr.setRequestHeader(header.name, header.value);
     }
-    throw new Error(`HTTP ${xhr.status}`);
+    xhr.send(null);
+    return {
+      statusCode: xhr.status,
+      headers: this._parseResponseHeaders(xhr.getAllResponseHeaders()),
+      body: new Uint8Array(xhr.response ?? new ArrayBuffer(0)),
+    };
   }
 
-  _buildSocketExtension() {
-    const self = this;
-    return {
-      sock_open(_af, _socktype, _proto, fdOutPtr) {
-        try {
-          const fd = self._nextFd++;
-          self._sockets.set(fd, {
-            endpoint: null,
-            recvBuffer: new Uint8Array(0),
-            recvOffset: 0,
+  _parseResponseHeaders(rawHeaders) {
+    if (!rawHeaders) return [];
+    return rawHeaders
+      .trim()
+      .split(/[\r\n]+/)
+      .map((line) => {
+        const separator = line.indexOf(':');
+        if (separator === -1) return null;
+        return {
+          name: line.slice(0, separator).trim(),
+          value: line.slice(separator + 1).trim(),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  _encodeResponse(payload) {
+    return new TextEncoder().encode(
+      JSON.stringify({
+        wire_version: 1,
+        ...payload,
+      }),
+    );
+  }
+
+  _decodeRequest(bytes) {
+    const request = JSON.parse(new TextDecoder().decode(bytes));
+    if (request?.wire_version !== 1) {
+      throw new Error(`unsupported host request wire version ${request?.wire_version}`);
+    }
+    return request;
+  }
+
+  _executeNetworkRequest(bytes) {
+    try {
+      const request = this._decodeRequest(bytes);
+      if (request.kind === 'https_get') {
+        const endpoint = this._requestEndpointFor(request.host, request.path);
+        if (!endpoint) {
+          return this._encodeResponse({
+            kind: 'error',
+            error_kind: 'io',
+            message: `browser host denied request for ${request.host}${request.path}`,
           });
-          self._writeU32(fdOutPtr, fd);
-          return WASI_ESUCCESS;
-        } catch {
-          return WASI_EIO;
         }
-      },
-
-      sock_connect(fd, addrPtr, addrLen) {
-        const socket = self._sockets.get(fd);
-        if (!socket) return WASI_EBADF;
-        try {
-          const { ip, port } = self._decodeSockAddr(addrPtr, addrLen);
-          const endpoint = self._socketEndpointFor(ip, port);
-          if (!endpoint) {
-            return WASI_EINVAL;
-          }
-          socket.endpoint = endpoint;
-          return WASI_ESUCCESS;
-        } catch {
-          return WASI_EINVAL;
-        }
-      },
-
-      sock_send(fd, siDataPtr, siDataLen, _siFlags, datalenOutPtr) {
-        const socket = self._sockets.get(fd);
-        if (!socket) return WASI_EBADF;
-        if (!socket.endpoint) return WASI_EINVAL;
-
-        try {
-          if (socket.endpoint.startsWith('ws://') || socket.endpoint.startsWith('wss://')) {
-            return WASI_ENOSYS;
-          }
-
-          const regions = self._readIovecs(siDataPtr, siDataLen);
-          const chunks = regions.map(([ptr, len]) => self._readBytes(ptr, len));
-          const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-          const body = new Uint8Array(total);
-          let offset = 0;
-          for (const chunk of chunks) {
-            body.set(chunk, offset);
-            offset += chunk.length;
-          }
-
-          socket.recvBuffer = self._syncHttpPost(socket.endpoint, body);
-          socket.recvOffset = 0;
-          self._writeU32(datalenOutPtr, body.length);
-          return WASI_ESUCCESS;
-        } catch {
-          return WASI_EIO;
-        }
-      },
-
-      sock_recv(fd, riDataPtr, riDataLen, _riFlags, datalenOutPtr, roflagsOutPtr) {
-        const socket = self._sockets.get(fd);
-        if (!socket) return WASI_EBADF;
-
-        try {
-          const regions = self._readIovecs(riDataPtr, riDataLen);
-          let written = 0;
-          for (const [ptr, len] of regions) {
-            const remaining = socket.recvBuffer.length - socket.recvOffset;
-            if (remaining <= 0) break;
-            const chunkLen = Math.min(len, remaining);
-            self._writeBytes(
-              ptr,
-              socket.recvBuffer.subarray(socket.recvOffset, socket.recvOffset + chunkLen),
-            );
-            socket.recvOffset += chunkLen;
-            written += chunkLen;
-          }
-          self._writeU32(datalenOutPtr, written);
-          self._writeU16(roflagsOutPtr, 0);
-          return WASI_ESUCCESS;
-        } catch {
-          return WASI_EIO;
-        }
-      },
-
-      sock_shutdown(fd, _how) {
-        if (!self._sockets.has(fd)) return WASI_EBADF;
-        self._sockets.delete(fd);
-        return WASI_ESUCCESS;
-      },
-    };
+        const response = this._syncHttpGet(endpoint, request.headers ?? []);
+        return this._encodeResponse({
+          kind: 'http',
+          status_code: response.statusCode,
+          headers: response.headers,
+          body: Array.from(response.body),
+        });
+      }
+      if (request.kind === 'tcp_connect') {
+        return this._encodeResponse({
+          kind: 'error',
+          error_kind: 'io',
+          message: 'tcp_connect is unsupported in the browser host',
+        });
+      }
+      return this._encodeResponse({
+        kind: 'error',
+        error_kind: 'io',
+        message: `unsupported request kind '${request.kind}'`,
+      });
+    } catch (error) {
+      return this._encodeResponse({
+        kind: 'error',
+        error_kind: 'io',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   _buildVzglydHost() {
@@ -726,8 +743,7 @@ export class VzglydSidecarHost extends BaseWasmHost {
         if (ptr < 0 || len < 0) return HOST_ERROR;
         try {
           const bytes = self._readBytes(ptr >>> 0, len >>> 0);
-          self._channelState.latest = bytes;
-          self._channelState.dirty = true;
+          self._emitChannelPush(bytes);
           return WASI_ESUCCESS;
         } catch {
           return HOST_ERROR;
@@ -741,7 +757,7 @@ export class VzglydSidecarHost extends BaseWasmHost {
       log_info(ptr, len) {
         try {
           const msg = self._readString(ptr >>> 0, len >>> 0);
-          console.log('[vzglyd][sidecar]', msg);
+          self._logSidecar(msg);
           return WASI_ESUCCESS;
         } catch {
           return HOST_ERROR;
@@ -751,15 +767,38 @@ export class VzglydSidecarHost extends BaseWasmHost {
       channel_active() {
         return self._channelState.active ? 1 : 0;
       },
+
+      network_request(ptr, len) {
+        if (ptr < 0 || len < 0) return HOST_ERROR;
+        try {
+          const requestBytes = self._readBytes(ptr >>> 0, len >>> 0);
+          self._lastNetworkResponse = self._executeNetworkRequest(requestBytes);
+          return WASI_ESUCCESS;
+        } catch {
+          self._lastNetworkResponse = null;
+          return HOST_ERROR;
+        }
+      },
+
+      network_response_len() {
+        return self._lastNetworkResponse ? self._lastNetworkResponse.length : 0;
+      },
+
+      network_response_read(ptr, len) {
+        if (ptr < 0 || len < 0) return HOST_ERROR;
+        if (!self._lastNetworkResponse) return 0;
+        if (self._lastNetworkResponse.length > (len >>> 0)) {
+          return HOST_BUFFER_TOO_SMALL;
+        }
+        self._writeBytes(ptr >>> 0, self._lastNetworkResponse);
+        return self._lastNetworkResponse.length;
+      },
     };
   }
 
   buildImports() {
     return {
-      wasi_snapshot_preview1: {
-        ...this._buildWasiBase(),
-        ...this._buildSocketExtension(),
-      },
+      wasi_snapshot_preview1: this._buildWasiBase(),
       vzglyd_host: this._buildVzglydHost(),
     };
   }

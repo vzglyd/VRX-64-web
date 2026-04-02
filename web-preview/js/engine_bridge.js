@@ -1,9 +1,69 @@
+const PREVIEW_BUILD_ID = '2026-04-03-shaderfix-3';
+
 import { decodeSlideSpec } from './postcard.js';
-import { VzglydRenderer } from './renderer.js';
-import { VzglydSidecarHost, VzglydWasmHost } from './wasm-host.js';
-import { loadGlbScene, encodeMeshAsset, encodeSceneAnchorSet } from '../pkg/vzglyd_web.js';
+import { VzglydRenderer } from './renderer.js?v=2026-04-03-shaderfix-3';
+import { VzglydWasmHost } from './wasm-host.js';
+import { loadGlbScene, encodeMeshAsset, encodeSceneAnchorSet } from '../pkg/vzglyd_web.js?v=2026-04-03-shaderfix-3';
 
 const WIRE_VERSION = 1;
+
+function toWorldLightingSpec(compiledLighting, fallbackLighting = null) {
+  if (!compiledLighting?.directional_light && !fallbackLighting) return null;
+
+  return {
+    ambient_color: fallbackLighting?.ambient_color ?? [1, 1, 1],
+    ambient_intensity: fallbackLighting?.ambient_intensity ?? 0.22,
+    directional_light: compiledLighting?.directional_light
+      ? {
+          direction: compiledLighting.directional_light.direction,
+          color: compiledLighting.directional_light.color,
+          intensity: compiledLighting.directional_light.intensity,
+        }
+      : (fallbackLighting?.directional_light ?? null),
+  };
+}
+
+function toWorldStaticMesh(mesh) {
+  return {
+    label: mesh.label || mesh.id,
+    vertices: mesh.vertices.map((vertex) => ({
+      position: vertex.position,
+      normal: vertex.normal,
+      color: vertex.color,
+      mode: vertex.mode,
+    })),
+    indices: mesh.indices,
+  };
+}
+
+function toWorldDraw(mesh, meshIndex) {
+  return {
+    label: mesh.label || mesh.id,
+    source: { kind: 'Static', index: meshIndex },
+    pipeline: mesh.pipeline === 'transparent' ? 'Transparent' : 'Opaque',
+    index_range: { start: 0, end: mesh.indices.length },
+  };
+}
+
+function attachHybridWorldBackground(spec, compiledMeshes, compiledCameraPath, compiledLighting) {
+  const static_meshes = compiledMeshes.map(toWorldStaticMesh);
+  const draws = compiledMeshes.map((mesh, index) => toWorldDraw(mesh, index));
+
+  spec.background_world = {
+    name: `${spec.name}_background_world`,
+    scene_space: 'World3D',
+    camera_path: compiledCameraPath ?? spec.camera_path,
+    lighting: toWorldLightingSpec(compiledLighting, spec.lighting),
+    shaders: null,
+    overlay: null,
+    font: null,
+    textures_used: 0,
+    textures: [],
+    static_meshes,
+    dynamic_meshes: [],
+    draws,
+  };
+}
 
 function asUint8Array(bytesLike) {
   if (bytesLike instanceof Uint8Array) return bytesLike;
@@ -96,6 +156,95 @@ function requiresAuthoredSceneCompilation(manifest) {
   return Array.isArray(manifest?.assets?.scenes) && manifest.assets.scenes.length > 0;
 }
 
+class SidecarWorkerRuntime {
+  constructor(options = {}) {
+    this._channelState = options.channelState;
+    this._networkPolicy = options.networkPolicy ?? 'any_https';
+    this._endpointMap = options.endpointMap ?? {};
+    this._worker = null;
+  }
+
+  async start(wasmBytes) {
+    if (typeof Worker !== 'function') {
+      throw new Error('browser sidecars require Worker support');
+    }
+
+    const worker = new Worker(new URL(`./sidecar-worker.js?v=${PREVIEW_BUILD_ID}`, import.meta.url), {
+      type: 'module',
+    });
+    this._worker = worker;
+
+    const ready = new Promise((resolve, reject) => {
+      const cleanup = () => {
+        worker.removeEventListener('message', onMessage);
+        worker.removeEventListener('error', onError);
+      };
+
+      const onMessage = (event) => {
+        const { data } = event;
+        if (data?.type === 'ready') {
+          cleanup();
+          resolve();
+          return;
+        }
+        if (data?.type === 'error') {
+          cleanup();
+          reject(new Error(data.message));
+          return;
+        }
+        this._handleMessage(data);
+      };
+
+      const onError = (event) => {
+        cleanup();
+        reject(event.error ?? new Error(event.message));
+      };
+
+      worker.addEventListener('message', onMessage);
+      worker.addEventListener('error', onError);
+    });
+
+    worker.addEventListener('message', (event) => {
+      this._handleMessage(event.data);
+    });
+
+    worker.postMessage(
+      {
+        type: 'init',
+        wasmBytes,
+        networkPolicy: this._networkPolicy,
+        endpointMap: this._endpointMap,
+      },
+      [wasmBytes.buffer],
+    );
+
+    await ready;
+  }
+
+  _handleMessage(data) {
+    if (!data || typeof data !== 'object') return;
+    if (data.type === 'channel_push' && data.bytes) {
+      this._channelState.latest = data.bytes;
+      this._channelState.dirty = true;
+      return;
+    }
+    if (data.type === 'log') {
+      console.log('[vzglyd][sidecar]', data.message);
+      return;
+    }
+    if (data.type === 'error') {
+      console.error('[vzglyd][sidecar]', data.message);
+    }
+  }
+
+  terminate() {
+    if (this._worker) {
+      this._worker.terminate();
+      this._worker = null;
+    }
+  }
+}
+
 export class EngineBridge {
   constructor(canvas, hostConfig = null) {
     if (!(canvas instanceof HTMLCanvasElement)) {
@@ -122,6 +271,7 @@ export class EngineBridge {
     this._lastError = null;
     this._compiledSceneMeshes = [];
     this._compiledSceneCameraPath = null;
+    this._compiledSceneLighting = null;
   }
 
   async loadBundle(bundleBytes, runtimeOptions = null) {
@@ -166,44 +316,37 @@ export class EngineBridge {
 
       let spec = decodeSlideSpec(specWire.slice(1));
       
-      // Append compiled GLB meshes to the spec
       if (this._compiledSceneMeshes && this._compiledSceneMeshes.length > 0) {
-        console.log('[vzglyd] Adding', this._compiledSceneMeshes.length, 'compiled meshes to spec');
-        
-        for (const mesh of this._compiledSceneMeshes) {
-          // Ensure vertices have tex_coords for Screen2D mode
-          const vertices = mesh.vertices.map(v => ({
-            position: v.position,
-            normal: v.normal,
-            color: v.color,
-            mode: v.mode,
-            tex_coords: v.tex_coords || [0, 0], // Default UVs if not present
-          }));
-          
-          // Add to static_meshes
-          spec.static_meshes.push({
-            label: mesh.label || mesh.id,
-            vertices,
-            indices: mesh.indices,
-          });
-          
-          // Add corresponding draw spec
-          const meshIndex = spec.static_meshes.length - 1;
-          spec.draws.push({
-            label: mesh.label || mesh.id,
-            source: { kind: 'Static', index: meshIndex },
-            pipeline: mesh.pipeline === 'transparent' ? 'Transparent' : 'Opaque',
-            index_range: { start: 0, end: mesh.indices.length },
-          });
+        if (spec.scene_space === 'Screen2D') {
+          console.log('[vzglyd] Attaching', this._compiledSceneMeshes.length, 'compiled meshes as World3D background');
+          attachHybridWorldBackground(
+            spec,
+            this._compiledSceneMeshes,
+            this._compiledSceneCameraPath,
+            this._compiledSceneLighting,
+          );
+        } else {
+          console.log('[vzglyd] Adding', this._compiledSceneMeshes.length, 'compiled meshes to spec');
+
+          for (const mesh of this._compiledSceneMeshes) {
+            spec.static_meshes.push(toWorldStaticMesh(mesh));
+
+            const meshIndex = spec.static_meshes.length - 1;
+            spec.draws.push(toWorldDraw(mesh, meshIndex));
+          }
+
+          console.log('[vzglyd] Spec now has', spec.static_meshes.length, 'meshes and', spec.draws.length, 'draws');
         }
-        
-        console.log('[vzglyd] Spec now has', spec.static_meshes.length, 'meshes and', spec.draws.length, 'draws');
       }
       
       // Apply camera path from GLB if available
       if (this._compiledSceneCameraPath) {
         console.log('[vzglyd] Applying camera path from GLB:', this._compiledSceneCameraPath);
         spec.camera_path = this._compiledSceneCameraPath;
+      }
+
+      if (this._compiledSceneLighting) {
+        spec.lighting = toWorldLightingSpec(this._compiledSceneLighting, spec.lighting);
       }
       
       const renderer = new VzglydRenderer(this._canvas, spec);
@@ -214,24 +357,13 @@ export class EngineBridge {
 
       let sidecarHost = null;
       if (pkg.sidecarWasm) {
-        if (!this._hostConfig?.allowMainThreadSidecar) {
-          throw new Error(
-            'bundle includes sidecar.wasm; sidecar runtime is disabled in browser host to avoid UI thread freezes',
-          );
-        }
-
-        sidecarHost = new VzglydSidecarHost({
+        sidecarHost = new SidecarWorkerRuntime({
           channelState: this._channelState,
           networkPolicy: this._hostConfig?.networkPolicy ?? 'any_https',
           endpointMap: this._hostConfig?.sidecarEndpoints ?? {},
         });
         this._channelState.active = true;
-        const sidecarModule = await WebAssembly.instantiate(
-          pkg.sidecarWasm,
-          sidecarHost.buildImports(),
-        );
-        sidecarHost.setInstance(sidecarModule.instance);
-        sidecarHost.run();
+        await sidecarHost.start(pkg.sidecarWasm.slice());
       }
 
       this._renderer = renderer;
@@ -322,6 +454,11 @@ export class EngineBridge {
         console.log('[vzglyd] Found camera path with', compiledScene.camera_path.keyframes.length, 'keyframes');
       }
 
+      if (compiledScene.lighting) {
+        this._compiledSceneLighting = compiledScene.lighting;
+        console.log('[vzglyd] Found compiled scene lighting');
+      }
+
       // Encode the scene anchor set
       const encodedAnchors = encodeSceneAnchorSet(compiledSceneJson);
       const anchorKey = compiledScene.id;
@@ -353,6 +490,12 @@ export class EngineBridge {
 
   teardown() {
     this._channelState.active = false;
+    this._channelState.latest = null;
+    this._channelState.dirty = false;
+
+    if (this._sidecarHost) {
+      this._sidecarHost.terminate();
+    }
 
     if (this._renderer) {
       this._renderer.stop();
@@ -365,6 +508,7 @@ export class EngineBridge {
     this._lastTimestampMs = null;
     this._compiledSceneMeshes = [];
     this._compiledSceneCameraPath = null;
+    this._compiledSceneLighting = null;
   }
 
   stats() {

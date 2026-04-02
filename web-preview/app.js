@@ -2,6 +2,9 @@
  * app.js — thin UI shell for the Rust WebHost runtime.
  */
 
+const PREVIEW_BUILD_ID = '2026-04-03-shaderfix-3';
+console.info('[vzglyd] preview_build', PREVIEW_BUILD_ID);
+
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const canvasContainer = document.getElementById('canvas-container');
@@ -85,7 +88,7 @@ async function initHost() {
 
   setStatus('Loading engine...', true);
   try {
-    const { default: init, WebHost } = await import('./pkg/vzglyd_web.js');
+    const { default: init, WebHost } = await import(`./pkg/vzglyd_web.js?v=${PREVIEW_BUILD_ID}`);
     await init();
 
     webHost = new WebHost(canvas, {

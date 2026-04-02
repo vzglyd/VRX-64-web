@@ -385,6 +385,18 @@ function createIndexBuffer(device, uint16Data, label) {
   return buf;
 }
 
+function createStaticMeshBuffers(device, meshes, sceneSpace, labelPrefix) {
+  return meshes.map((mesh, index) => {
+    const verts = packVertices(mesh.vertices, sceneSpace);
+    const indices = packIndices(mesh.indices);
+    return {
+      vertex: createVertexBuffer(device, verts, `${labelPrefix}_vertex_${index}`),
+      index: createIndexBuffer(device, indices, `${labelPrefix}_index_${index}`),
+      indexCount: indices.length,
+    };
+  });
+}
+
 // ── Camera interpolation ──────────────────────────────────────────────────────
 
 function sampleCamera(cameraPath, elapsed) {
@@ -481,6 +493,178 @@ const WORLD3D_VERTEX_LAYOUT = {
 
 function buildShaderSource(prelude, body) {
   return prelude + '\n' + body;
+}
+
+const VZGLYD_VERTEX_ENTRY_POINT = 'vs_main';
+const VZGLYD_FRAGMENT_ENTRY_POINT = 'fs_main';
+
+function countEntryPoint(source, entryPoint) {
+  if (!source) return 0;
+  const pattern = new RegExp(`\\bfn\\s+${entryPoint}\\s*\\(`, 'g');
+  return [...source.matchAll(pattern)].length;
+}
+
+function analyzeShaderChunk(label, source) {
+  const text = source ?? null;
+  if (!text || text.trim() === '') {
+    return {
+      label,
+      source: null,
+      present: false,
+      vsCount: 0,
+      fsCount: 0,
+      kind: 'empty',
+    };
+  }
+
+  const vsCount = countEntryPoint(text, VZGLYD_VERTEX_ENTRY_POINT);
+  const fsCount = countEntryPoint(text, VZGLYD_FRAGMENT_ENTRY_POINT);
+
+  let kind = 'helper';
+  if (vsCount > 0 && fsCount > 0) kind = 'full';
+  else if (vsCount > 0) kind = 'vertex';
+  else if (fsCount > 0) kind = 'fragment';
+
+  return {
+    label,
+    source: text,
+    present: true,
+    vsCount,
+    fsCount,
+    kind,
+  };
+}
+
+function shaderChunkSummary(chunk) {
+  return `${chunk.label} (kind=${chunk.kind}, vs_main=${chunk.vsCount}, fs_main=${chunk.fsCount})`;
+}
+
+function preflightShaderBody(body) {
+  const vsCount = countEntryPoint(body, VZGLYD_VERTEX_ENTRY_POINT);
+  const fsCount = countEntryPoint(body, VZGLYD_FRAGMENT_ENTRY_POINT);
+  if (vsCount !== 1 || fsCount !== 1) {
+    return {
+      error:
+        `expected exactly one ${VZGLYD_VERTEX_ENTRY_POINT} and one ${VZGLYD_FRAGMENT_ENTRY_POINT} ` +
+        `after normalization, got ${VZGLYD_VERTEX_ENTRY_POINT}=${vsCount}, ${VZGLYD_FRAGMENT_ENTRY_POINT}=${fsCount}`,
+    };
+  }
+  return { error: null };
+}
+
+export function normalizeCustomShaderBody(shaders) {
+  const warnings = [];
+  const infos = [];
+  if (!shaders) return { body: null, warnings, infos, error: null };
+
+  const vertex = analyzeShaderChunk('vertex_wgsl', shaders.vertex_wgsl);
+  const fragment = analyzeShaderChunk('fragment_wgsl', shaders.fragment_wgsl);
+  const present = [vertex, fragment].filter(chunk => chunk.present);
+
+  if (present.length === 0) {
+    return { body: null, warnings, infos, error: null };
+  }
+
+  const duplicateInChunk = present.find(chunk => chunk.vsCount > 1 || chunk.fsCount > 1);
+  if (duplicateInChunk) {
+    return {
+      body: null,
+      warnings,
+      infos,
+      error: `${shaderChunkSummary(duplicateInChunk)} declares duplicate entry points inside a single source blob`,
+    };
+  }
+
+  const fullChunks = present.filter(chunk => chunk.kind === 'full');
+  if (fullChunks.length === 1) {
+    const winner = fullChunks[0];
+    const ignored = present.find(chunk => chunk !== winner);
+    if (ignored) {
+      warnings.push(
+        `${winner.label} already defines both ${VZGLYD_VERTEX_ENTRY_POINT} and ${VZGLYD_FRAGMENT_ENTRY_POINT}; ignoring ${ignored.label}`,
+      );
+    }
+    return { body: winner.source, warnings, infos, error: null };
+  }
+
+  if (fullChunks.length === 2) {
+    const sameModule = vertex.source.trim() === fragment.source.trim();
+    (sameModule ? infos : warnings).push(
+      sameModule
+        ? 'vertex_wgsl and fragment_wgsl both contain the same full shader module; using fragment_wgsl'
+        : 'vertex_wgsl and fragment_wgsl both contain full shader modules; using fragment_wgsl and ignoring vertex_wgsl',
+    );
+    return { body: fragment.source, warnings, infos, error: null };
+  }
+
+  const helperChunk = present.find(chunk => chunk.kind === 'helper');
+  if (helperChunk) {
+    return {
+      body: null,
+      warnings,
+      infos,
+      error:
+        `${shaderChunkSummary(helperChunk)} does not declare ${VZGLYD_VERTEX_ENTRY_POINT} ` +
+        `or ${VZGLYD_FRAGMENT_ENTRY_POINT}`,
+    };
+  }
+
+  const vertexChunks = present.filter(chunk => chunk.kind === 'vertex');
+  const fragmentChunks = present.filter(chunk => chunk.kind === 'fragment');
+
+  if (vertexChunks.length > 1 || fragmentChunks.length > 1) {
+    return {
+      body: null,
+      warnings,
+      infos,
+      error:
+        `conflicting split-stage shader payload: ` +
+        `${present.map(shaderChunkSummary).join(', ')}`,
+    };
+  }
+
+  if (vertexChunks.length === 1 && fragmentChunks.length === 1) {
+    if (vertexChunks[0].label !== 'vertex_wgsl' || fragmentChunks[0].label !== 'fragment_wgsl') {
+      infos.push('custom shader stages were supplied in the opposite fields; reordering by detected entry point');
+    }
+
+    const body = vertexChunks[0].source + '\n' + fragmentChunks[0].source;
+    const preflight = preflightShaderBody(body);
+    return { body: preflight.error ? null : body, warnings, infos, error: preflight.error };
+  }
+
+  return {
+    body: null,
+    warnings,
+    infos,
+    error:
+      `incomplete custom shader payload: ${present.map(shaderChunkSummary).join(', ')}; ` +
+      `expected either one full module or one vertex stage plus one fragment stage`,
+  };
+}
+
+function resolveCustomShaderSource(prelude, shaders) {
+  const normalized = normalizeCustomShaderBody(shaders);
+  if (!normalized.body || normalized.error) return { ...normalized, source: null };
+
+  const preflight = preflightShaderBody(normalized.body);
+  if (preflight.error) {
+    return {
+      body: null,
+      warnings: normalized.warnings,
+      infos: normalized.infos,
+      error: preflight.error,
+      source: null,
+    };
+  }
+
+  return {
+    body: normalized.body,
+    warnings: normalized.warnings,
+    infos: normalized.infos,
+    error: null,
+    source: buildShaderSource(prelude, normalized.body),
+  };
 }
 
 function createPipeline(device, bgl, shaderSrc, vertexLayout, pipelineKind, format, hasDepth) {
@@ -586,29 +770,71 @@ async function createPipelineWithFallback(device, bgl, customSrc, defaultSrc, ve
   const err = await device.popErrorScope();
   if (!err) return { pipeline, usedFallback: false };
 
-  console.warn(`[vzglyd] Custom ${pipelineKind} shader failed validation even after textureSample patch — falling back to default shader.\n${err.message}`);
+  console.warn(`[vzglyd] Custom ${pipelineKind} shader failed GPU validation after textureSample patch — falling back to default shader.\n${err.message}`);
   return {
     pipeline: createPipeline(device, bgl, defaultSrc, vertexLayout, pipelineKind, format, hasDepth),
     usedFallback: true,
   };
 }
 
-/**
- * Build the combined shader body from ShaderSources.
- * vzglyd convention:
- *   - fragment_wgsl alone: contains both @vertex vs_main and @fragment fs_main
- *   - vertex_wgsl alone:   contains both entry points
- *   - both set:            concatenated (vertex_wgsl first)
- *   - neither:             returns null → use the built-in default body
- */
-function customShaderBody(shaders) {
-  if (!shaders) return null;
-  const v = shaders.vertex_wgsl;
-  const f = shaders.fragment_wgsl;
-  if (v && f) return v + '\n' + f;
-  if (f)      return f;   // fragment_wgsl carries the full body (most common)
-  if (v)      return v;
-  return null;
+async function buildPipelines(device, bgl, prelude, customShaders, defaultBody, vertexLayout, format, hasDepth, sceneSpace) {
+  const defaultSrc = buildShaderSource(prelude, defaultBody);
+  const resolved = resolveCustomShaderSource(prelude, customShaders);
+
+  for (const info of resolved.infos) {
+    console.info(`[vzglyd] ${sceneSpace} custom shader: ${info}.`);
+  }
+  for (const warning of resolved.warnings) {
+    console.warn(`[vzglyd] ${sceneSpace} custom shader: ${warning}.`);
+  }
+
+  if (!resolved.source) {
+    if (resolved.error) {
+      console.warn(`[vzglyd] ${sceneSpace} custom shader rejected before GPU validation — falling back to default shader.\n${resolved.error}`);
+    }
+
+    return {
+      opaque: createPipeline(device, bgl, defaultSrc, vertexLayout, 'Opaque', format, hasDepth),
+      transparent: createPipeline(device, bgl, defaultSrc, vertexLayout, 'Transparent', format, hasDepth),
+      usedFallback: Boolean(resolved.error),
+    };
+  }
+
+  const opaqueResult = await createPipelineWithFallback(
+    device,
+    bgl,
+    resolved.source,
+    defaultSrc,
+    vertexLayout,
+    'Opaque',
+    format,
+    hasDepth,
+  );
+
+  if (opaqueResult.usedFallback) {
+    return {
+      opaque: opaqueResult.pipeline,
+      transparent: createPipeline(device, bgl, defaultSrc, vertexLayout, 'Transparent', format, hasDepth),
+      usedFallback: true,
+    };
+  }
+
+  const transparentResult = await createPipelineWithFallback(
+    device,
+    bgl,
+    resolved.source,
+    defaultSrc,
+    vertexLayout,
+    'Transparent',
+    format,
+    hasDepth,
+  );
+
+  return {
+    opaque: opaqueResult.pipeline,
+    transparent: transparentResult.pipeline,
+    usedFallback: transparentResult.usedFallback,
+  };
 }
 
 // ── VzglydRenderer ────────────────────────────────────────────────────────────
@@ -632,6 +858,7 @@ export class VzglydRenderer {
     this._staticBufs  = [];  // [{ vertex, index, indexCount }]
     this._dynamicBufs = [];  // [{ vertex, index, indexCount }]
     this._overlayBuf  = null;
+    this._backgroundWorld = null;
 
     this._elapsed       = 0;
     this._frameCount    = 0;
@@ -682,6 +909,9 @@ export class VzglydRenderer {
       const samplers = this._world3DSamplers(spec);
       await this._buildWorld3DResources(views, samplers);
     } else {
+      if (spec.background_world) {
+        await this._buildHybridWorldBackgroundResources(spec.background_world, fallback);
+      }
       // Screen2D: textures[0]=t_diffuse, font=t_font, [1]=t_detail, [2]=t_lookup
       const views = this._uploadScreen2DTextures(spec, fallback);
       const samplers = this._screen2DSamplers(spec);
@@ -746,31 +976,79 @@ export class VzglydRenderer {
       ],
     });
 
-    const customBody  = customShaderBody(spec.shaders);
-    const hasCustomShader = !!customBody;
-    const customSrc  = hasCustomShader
-      ? buildShaderSource(SCREEN2D_PRELUDE, customBody)
-      : null;
-    const defaultSrc = buildShaderSource(SCREEN2D_PRELUDE, SCREEN2D_DEFAULT_BODY);
-
     const vertLayout = SCREEN2D_VERTEX_LAYOUT;
     const fmt        = this._format;
     const hasDepth   = true;
 
-    if (hasCustomShader) {
-      const { pipeline: op, usedFallback: fbO } = await createPipelineWithFallback(device, bgl, customSrc, defaultSrc, vertLayout, 'Opaque',      fmt, hasDepth);
-      const { pipeline: tr, usedFallback: fbT } = await createPipelineWithFallback(device, bgl, customSrc, defaultSrc, vertLayout, 'Transparent', fmt, hasDepth);
-      this._pipelines.Opaque      = op;
-      this._pipelines.Transparent = tr;
-      if (fbO || fbT) this._shaderFallback = true;
-    } else {
-      this._pipelines.Opaque      = createPipeline(device, bgl, defaultSrc, vertLayout, 'Opaque',      fmt, hasDepth);
-      this._pipelines.Transparent = createPipeline(device, bgl, defaultSrc, vertLayout, 'Transparent', fmt, hasDepth);
-    }
+    const { opaque, transparent, usedFallback } = await buildPipelines(
+      device,
+      bgl,
+      SCREEN2D_PRELUDE,
+      spec.shaders,
+      SCREEN2D_DEFAULT_BODY,
+      vertLayout,
+      fmt,
+      hasDepth,
+      'Screen2D',
+    );
+    this._pipelines.Opaque = opaque;
+    this._pipelines.Transparent = transparent;
+    if (usedFallback) this._shaderFallback = true;
 
     this._uploadStaticMeshes(SCREEN2D_VERTEX_LAYOUT.arrayStride);
     this._allocDynamicMeshes(SCREEN2D_VERTEX_LAYOUT.arrayStride);
     this._buildDepthTexture();
+  }
+
+  async _buildHybridWorldBackgroundResources(backgroundSpec, fallback) {
+    const device = this._device;
+
+    const uniformBuf = device.createBuffer({
+      label: 'hybrid_world_uniforms',
+      size:  160,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const views = this._uploadWorld3DTextures(backgroundSpec, fallback);
+    const samplers = this._world3DSamplers(backgroundSpec);
+    const bgl = makeWorld3DBindGroupLayout(device);
+    const bindGroup = device.createBindGroup({
+      layout:  bgl,
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuf } },
+        { binding: 1, resource: views.font },
+        { binding: 2, resource: views.noise },
+        { binding: 3, resource: views.materialA },
+        { binding: 4, resource: views.materialB },
+        { binding: 5, resource: samplers.clampSampler },
+        { binding: 6, resource: samplers.repeatSampler },
+      ],
+    });
+
+    const { opaque, transparent, usedFallback } = await buildPipelines(
+      device,
+      bgl,
+      WORLD3D_PRELUDE,
+      backgroundSpec.shaders,
+      WORLD3D_DEFAULT_BODY,
+      WORLD3D_VERTEX_LAYOUT,
+      this._format,
+      true,
+      'HybridWorld3D',
+    );
+
+    this._backgroundWorld = {
+      spec: backgroundSpec,
+      uniformBuf,
+      bindGroup,
+      pipelines: {
+        Opaque: opaque,
+        Transparent: transparent,
+      },
+      staticBufs: createStaticMeshBuffers(device, backgroundSpec.static_meshes, 'World3D', 'bg_world_static'),
+    };
+
+    if (usedFallback) this._shaderFallback = true;
   }
 
   // ── World3D setup ──────────────────────────────────────────────────────────
@@ -830,27 +1108,24 @@ export class VzglydRenderer {
       ],
     });
 
-    const customBody  = customShaderBody(spec.shaders);
-    const hasCustomShader = !!customBody;
-    const customSrc  = hasCustomShader
-      ? buildShaderSource(WORLD3D_PRELUDE, customBody)
-      : null;
-    const defaultSrc = buildShaderSource(WORLD3D_PRELUDE, WORLD3D_DEFAULT_BODY);
-
     const vertLayout = WORLD3D_VERTEX_LAYOUT;
     const fmt        = this._format;
     const hasDepth   = true;
 
-    if (hasCustomShader) {
-      const { pipeline: op, usedFallback: fbO } = await createPipelineWithFallback(device, bgl, customSrc, defaultSrc, vertLayout, 'Opaque',      fmt, hasDepth);
-      const { pipeline: tr, usedFallback: fbT } = await createPipelineWithFallback(device, bgl, customSrc, defaultSrc, vertLayout, 'Transparent', fmt, hasDepth);
-      this._pipelines.Opaque      = op;
-      this._pipelines.Transparent = tr;
-      if (fbO || fbT) this._shaderFallback = true;
-    } else {
-      this._pipelines.Opaque      = createPipeline(device, bgl, defaultSrc, vertLayout, 'Opaque',      fmt, hasDepth);
-      this._pipelines.Transparent = createPipeline(device, bgl, defaultSrc, vertLayout, 'Transparent', fmt, hasDepth);
-    }
+    const { opaque, transparent, usedFallback } = await buildPipelines(
+      device,
+      bgl,
+      WORLD3D_PRELUDE,
+      spec.shaders,
+      WORLD3D_DEFAULT_BODY,
+      vertLayout,
+      fmt,
+      hasDepth,
+      'World3D',
+    );
+    this._pipelines.Opaque = opaque;
+    this._pipelines.Transparent = transparent;
+    if (usedFallback) this._shaderFallback = true;
 
     this._uploadStaticMeshes(WORLD3D_VERTEX_LAYOUT.arrayStride);
     this._allocDynamicMeshes(WORLD3D_VERTEX_LAYOUT.arrayStride);
@@ -860,18 +1135,8 @@ export class VzglydRenderer {
   // ── Mesh buffer management ─────────────────────────────────────────────────
 
   _uploadStaticMeshes(stride) {
-    const device = this._device;
-    const spec   = this._spec;
-
-    this._staticBufs = spec.static_meshes.map((mesh, i) => {
-      const verts   = packVertices(mesh.vertices, spec.scene_space);
-      const indices = packIndices(mesh.indices);
-      return {
-        vertex:     createVertexBuffer(device, verts,   `static_vertex_${i}`),
-        index:      createIndexBuffer (device, indices, `static_index_${i}`),
-        indexCount: indices.length,
-      };
-    });
+    const spec = this._spec;
+    this._staticBufs = createStaticMeshBuffers(this._device, spec.static_meshes, spec.scene_space, 'static');
   }
 
   _allocDynamicMeshes(stride) {
@@ -956,8 +1221,7 @@ export class VzglydRenderer {
     this._queue.writeBuffer(this._uniformBuf, 0, data);
   }
 
-  _writeWorld3DUniforms(elapsed) {
-    const spec   = this._spec;
+  _writeWorldUniforms(spec, uniformBuf, elapsed) {
     const cam    = sampleCamera(spec.camera_path, elapsed);
     const aspect = this._canvas.width / this._canvas.height;
 
@@ -1009,7 +1273,41 @@ export class VzglydRenderer {
     // main_light_color: 36-39
     data.set(mainLightColor, 36);
 
-    this._queue.writeBuffer(this._uniformBuf, 0, data);
+    this._queue.writeBuffer(uniformBuf, 0, data);
+  }
+
+  _writeWorld3DUniforms(elapsed) {
+    this._writeWorldUniforms(this._spec, this._uniformBuf, elapsed);
+  }
+
+  _writeHybridWorldBackgroundUniforms(elapsed) {
+    if (!this._backgroundWorld) return;
+    this._writeWorldUniforms(this._backgroundWorld.spec, this._backgroundWorld.uniformBuf, elapsed);
+  }
+
+  _renderDrawList(renderPass, pipelines, bindGroup, draws, staticBufs, dynamicBufs = null) {
+    renderPass.setBindGroup(0, bindGroup);
+
+    for (const draw of draws) {
+      const pipeline = pipelines[draw.pipeline];
+      if (!pipeline) continue;
+      renderPass.setPipeline(pipeline);
+
+      const { kind, index } = draw.source;
+      const buf = kind === 'Static'
+        ? staticBufs[index]
+        : dynamicBufs?.[index];
+      if (!buf) continue;
+
+      renderPass.setVertexBuffer(0, buf.vertex);
+      renderPass.setIndexBuffer(buf.index, 'uint16');
+      const count = kind === 'Dynamic'
+        ? (buf.activeIndexCount ?? buf.indexCount)
+        : buf.indexCount;
+      const start = draw.index_range.start;
+      const end   = Math.min(draw.index_range.end, count);
+      if (end > start) renderPass.drawIndexed(end - start, 1, start, 0);
+    }
   }
 
   // ── Render pass ────────────────────────────────────────────────────────────
@@ -1018,6 +1316,9 @@ export class VzglydRenderer {
     this._elapsed += dt;
 
     const spec = this._spec;
+    if (this._backgroundWorld) {
+      this._writeHybridWorldBackgroundUniforms(this._elapsed);
+    }
     if (spec.scene_space === 'Screen2D') {
       this._writeScreen2DUniforms(this._elapsed);
     } else {
@@ -1037,12 +1338,38 @@ export class VzglydRenderer {
     const device = this._device;
     const encoder = device.createCommandEncoder();
     const colorTex = this._context.getCurrentTexture();
+    const colorView = colorTex.createView();
+
+    if (this._backgroundWorld) {
+      const backgroundPass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view:       colorView,
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          loadOp:     'clear',
+          storeOp:    'store',
+        }],
+        depthStencilAttachment: {
+          view:              this._depthView,
+          depthClearValue:   1.0,
+          depthLoadOp:       'clear',
+          depthStoreOp:      'store',
+        },
+      });
+      this._renderDrawList(
+        backgroundPass,
+        this._backgroundWorld.pipelines,
+        this._backgroundWorld.bindGroup,
+        this._backgroundWorld.spec.draws,
+        this._backgroundWorld.staticBufs,
+      );
+      backgroundPass.end();
+    }
 
     const renderPass = encoder.beginRenderPass({
       colorAttachments: [{
-        view:       colorTex.createView(),
+        view:       colorView,
         clearValue: { r: 0, g: 0, b: 0, a: 1 },
-        loadOp:     'clear',
+        loadOp:     this._backgroundWorld ? 'load' : 'clear',
         storeOp:    'store',
       }],
       depthStencilAttachment: {
@@ -1053,28 +1380,8 @@ export class VzglydRenderer {
       },
     });
 
-    renderPass.setBindGroup(0, this._bindGroup);
+    this._renderDrawList(renderPass, this._pipelines, this._bindGroup, spec.draws, this._staticBufs, this._dynamicBufs);
 
-    for (const draw of spec.draws) {
-      const pipeline = this._pipelines[draw.pipeline];
-      if (!pipeline) continue;
-      renderPass.setPipeline(pipeline);
-
-      const { kind, index } = draw.source;
-      const buf = kind === 'Static' ? this._staticBufs[index] : this._dynamicBufs[index];
-      if (!buf) continue;
-
-      renderPass.setVertexBuffer(0, buf.vertex);
-      renderPass.setIndexBuffer(buf.index, 'uint16');
-      const count = kind === 'Dynamic'
-        ? (buf.activeIndexCount ?? buf.indexCount)
-        : buf.indexCount;
-      const start = draw.index_range.start;
-      const end   = Math.min(draw.index_range.end, count);
-      if (end > start) renderPass.drawIndexed(end - start, 1, start, 0);
-    }
-
-    // Overlay
     if (this._overlayBuf && this._overlayBuf.indexCount > 0) {
       renderPass.setPipeline(this._pipelines.Transparent);
       renderPass.setBindGroup(0, this._bindGroup);
