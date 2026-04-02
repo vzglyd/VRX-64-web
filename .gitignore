@@ -3,6 +3,7 @@
 **/*.rs.bk
 Cargo.lock
 pkg/
+/web-preview/pkg/
 
 # Build artifacts
 *.so

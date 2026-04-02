@@ -1,8 +1,13 @@
-//! Web utilities.
+//! Utility helpers.
 
-use wasm_bindgen::prelude::*;
+use std::sync::Once;
 
-/// Returns the current time in seconds.
-pub fn now_secs() -> f64 {
-    js_sys::Date::now() / 1000.0
+static INIT: Once = Once::new();
+
+/// Initialize panic hook + logger once per page lifecycle.
+pub fn init_logging() {
+    INIT.call_once(|| {
+        console_error_panic_hook::set_once();
+        wasm_logger::init(wasm_logger::Config::default());
+    });
 }

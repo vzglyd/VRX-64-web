@@ -1,83 +1,46 @@
 # VZGLYD Web Host
 
-Web (WebGPU + WASM) host implementation for the VZGLYD display engine.
+Browser host for `.vzglyd` bundles.
 
-## Overview
+This repository now exports a runnable page from `web-preview/` where:
+- UI shell is JavaScript (`web-preview/app.js`)
+- Runtime API is Rust/WASM (`WebHost`)
+- Bundle extraction + WASM/sidecar/renderer bridge lives in `web-preview/js/`
 
-This crate integrates the platform-agnostic `vzglyd-kernel` with:
-- **WebGPU** (via web-sys) for GPU rendering
-- **Browser WASM** for slide instantiation
-- **fetch()** for asset loading
-- **requestAnimationFrame** for the render loop
-
-## Building
+## Build
 
 ```bash
-# Install wasm-pack if not already installed
+# one-time
 cargo install wasm-pack
 
-# Build for web
-wasm-pack build --target web --out-dir ../vzglyd.github.io/pkg
+# build wasm glue directly into the preview folder
+wasm-pack build --target web --out-dir web-preview/pkg
 ```
 
-## Usage
+## Run
 
-```javascript
-// In your HTML/JavaScript
+Serve the repository root over HTTP and open `http://localhost:8080/web-preview/`.
+
+```bash
+python3 -m http.server 8080
+```
+
+## WebHost API
+
+```js
 import init, { WebHost } from './pkg/vzglyd_web.js';
 
-async function start() {
-    await init();
-    
-    const canvas = document.getElementById('canvas');
-    const gpu = navigator.gpu;
-    const adapter = await gpu.requestAdapter();
-    const device = await adapter.requestDevice();
-    
-    const host = new WebHost(canvas, device);
-    
-    function frame(timestamp) {
-        host.frame(timestamp);
-        requestAnimationFrame(frame);
-    }
-    
-    requestAnimationFrame(frame);
-}
+await init();
+const host = new WebHost(canvas, { networkPolicy: 'any_https' });
 
-start();
+await host.loadBundle(bundleBytes, { logLoadSummary: true });
+host.frame(performance.now());
+const stats = host.stats();
+host.teardown();
 ```
 
-## Architecture
+## Notes
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       Web Host                              │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐   │
-│  │ HTML Canvas │  │ Browser WASM │  │ fetch()          │   │
-│  │             │  │              │  │ asset loading    │   │
-│  └─────────────┘  └──────────────┘  └──────────────────┘   │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐   │
-│  │ WebGPU      │  │ WebHost      │  │ RenderCommand    │   │
-│  │ (web-sys)   │  │ : Host       │  │ → WebGPU exec    │   │
-│  └─────────────┘  └──────────────┘  └──────────────────┘   │
-└────────────────────────────┬────────────────────────────────┘
-                             │ implements Host trait
-                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  VZGLYD Kernel                              │
-│  - Engine state machine                                     │
-│  - Slide scheduling                                         │
-│  - Transition logic                                         │
-│  - RenderCommand generation                                 │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## Browser Requirements
-
-- Chrome 113+ with WebGPU enabled
-- Edge 113+ with WebGPU enabled
-- Safari 18+ with WebGPU enabled
-
-## License
-
-MIT OR Apache-2.0
+- Current browser backend is WebGPU only.
+- `.vzglyd` archives are expected to contain `manifest.json` and `slide.wasm`.
+- Optional `sidecar.wasm` is loaded when present.

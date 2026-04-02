@@ -1,28 +1,15 @@
-//! WebGPU context and rendering.
+//! Browser GPU backend marker types.
 
-use wasm_bindgen::prelude::*;
-
-/// WebGPU context.
-pub struct WebGpuContext {
-    pub device: JsValue,
-    pub queue: JsValue,
+/// Supported browser backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    WebGpu,
 }
 
-impl WebGpuContext {
-    /// Creates a new WebGPU context.
-    pub fn new(device: JsValue) -> Self {
-        let queue = device.clone();  // Simplified - queue is from device
-        Self { device, queue }
+impl Backend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WebGpu => "webgpu",
+        }
     }
-}
-
-/// Offscreen render target.
-pub struct OffscreenTarget {
-    pub texture: JsValue,
-    pub view: JsValue,
-}
-
-/// Render pipeline handle.
-pub struct Pipeline {
-    pub pipeline: JsValue,
 }

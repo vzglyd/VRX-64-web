@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GLB Scene Test Harness</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            background: #1a1a2e; 
+            color: #eee; 
+            font-family: system-ui, sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        header {
+            padding: 1rem;
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+        }
+        h1 { font-size: 1.2rem; margin-bottom: 0.5rem; }
+        .controls { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+        #canvas { flex: 1; width: 100%; }
+        .log { 
+            height: 200px; 
+            overflow-y: auto; 
+            background: #0a0a14; 
+            padding: 1rem; 
+            font-family: monospace; 
+            font-size: 0.85rem;
+            border-top: 1px solid #0f3460;
+        }
+        .log-entry { margin: 0.25rem 0; }
+        .log-entry.error { color: #ff6b6b; }
+        .log-entry.success { color: #51cf66; }
+        .log-entry.info { color: #74c0fc; }
+        button {
+            padding: 0.5rem 1rem;
+            background: #e94560;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover { background: #ff6b6b; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        input[type="file"] { display: none; }
+        .file-label {
+            padding: 0.5rem 1rem;
+            background: #0f3460;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .file-label:hover { background: #1a4a7a; }
+        .status { padding: 0.5rem; background: #16213e; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🧪 GLB Scene Test Harness</h1>
+        <div class="controls">
+            <label class="file-label">
+                Load .vzglyd Bundle
+                <input type="file" id="bundleInput" accept=".vzglyd">
+            </label>
+            <button id="loadDefaultBtn">Load loading.vzglyd</button>
+            <span class="status" id="status">Status: Idle</span>
+        </div>
+    </header>
+    <canvas id="canvas"></canvas>
+    <div class="log" id="log"></div>
+
+    <script type="module">
+        import { WebHost } from './pkg/vzglyd_web.js';
+
+        const canvas = document.getElementById('canvas');
+        const logEl = document.getElementById('log');
+        const statusEl = document.getElementById('status');
+        const bundleInput = document.getElementById('bundleInput');
+        const loadDefaultBtn = document.getElementById('loadDefaultBtn');
+
+        let host = null;
+
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logEl.appendChild(entry);
+            logEl.scrollTop = logEl.scrollHeight;
+            console.log(message);
+        }
+
+        function setStatus(status) {
+            statusEl.textContent = `Status: ${status}`;
+        }
+
+        async function loadBundle(bytes, name) {
+            try {
+                setStatus(`Loading ${name}...`);
+                log(`Loading bundle: ${name}`, 'info');
+
+                if (host) {
+                    host.teardown();
+                }
+
+                host = new WebHost(canvas, { 
+                    allowMainThreadSidecar: false,
+                    networkPolicy: 'none'
+                });
+
+                const uint8Array = new Uint8Array(bytes);
+                await host.loadBundle(uint8Array, null);
+                
+                log(`Bundle loaded successfully!`, 'success');
+                setStatus('Running');
+
+                // Start render loop
+                function frame(timestamp) {
+                    if (host) {
+                        host.frame(timestamp);
+                        requestAnimationFrame(frame);
+                    }
+                }
+                requestAnimationFrame(frame);
+
+            } catch (error) {
+                log(`Error: ${error.message}`, 'error');
+                setStatus('Error');
+                console.error(error);
+            }
+        }
+
+        bundleInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (evt) => {
+                    loadBundle(evt.target.result, file.name);
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        });
+
+        loadDefaultBtn.addEventListener('click', async () => {
+            try {
+                setStatus('Fetching loading.vzglyd...');
+                log('Fetching loading.vzglyd...', 'info');
+                
+                const response = await fetch('../lume/target/debug/build/vzglyd-7fa5e9cf2f44ca9d/out/loading.vzglyd');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const bytes = await response.arrayBuffer();
+                log(`Downloaded ${bytes.byteLength} bytes`, 'info');
+                await loadBundle(bytes, 'loading.vzglyd');
+            } catch (error) {
+                log(`Failed to fetch loading.vzglyd: ${error.message}`, 'error');
+                setStatus('Fetch Failed');
+            }
+        });
+
+        // Intercept console.log to capture GLB loading logs
+        const originalLog = console.log;
+        console.log = function(...args) {
+            originalLog.apply(console, args);
+            const msg = args.join(' ');
+            if (msg.includes('[vzglyd]')) {
+                if (msg.includes('error') || msg.includes('Error') || msg.includes('failed')) {
+                    log(msg, 'error');
+                } else if (msg.includes('Compiled') || msg.includes('success')) {
+                    log(msg, 'success');
+                } else {
+                    log(msg, 'info');
+                }
+            }
+        };
+
+        log('Test harness ready. Load a .vzglyd bundle to test GLB scene loading.', 'info');
+    </script>
+</body>
+</html>
