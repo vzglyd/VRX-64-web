@@ -3,6 +3,52 @@
 version = 4
 
 [[package]]
+name = "VRX-64-kernel"
+version = "0.1.0"
+dependencies = [
+ "VRX-64-slide",
+ "bytemuck",
+ "glam",
+ "gltf",
+ "log",
+ "naga",
+ "postcard",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "VRX-64-slide"
+version = "0.1.0"
+source = "git+https://github.com/vzglyd/VRX-64-slide#988b9fe212f0422f5bc117225494a1b99c3eecc8"
+dependencies = [
+ "bytemuck",
+ "serde",
+]
+
+[[package]]
+name = "VRX-64-web"
+version = "0.1.0"
+dependencies = [
+ "VRX-64-kernel",
+ "VRX-64-slide",
+ "bytemuck",
+ "console_error_panic_hook",
+ "glam",
+ "gltf",
+ "js-sys",
+ "log",
+ "postcard",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-logger",
+ "web-sys",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -534,52 +580,6 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
-
-[[package]]
-name = "vzglyd-kernel"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam",
- "gltf",
- "log",
- "naga",
- "postcard",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "vzglyd-slide",
-]
-
-[[package]]
-name = "vzglyd-slide"
-version = "0.1.0"
-source = "git+https://github.com/vzglyd/vzglyd-slide#773aac15a198c97c255bd75a91e735d210da2605"
-dependencies = [
- "bytemuck",
- "serde",
-]
-
-[[package]]
-name = "vzglyd-web"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "console_error_panic_hook",
- "glam",
- "gltf",
- "js-sys",
- "log",
- "postcard",
- "serde",
- "serde_json",
- "vzglyd-kernel",
- "vzglyd-slide",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-logger",
- "web-sys",
-]
 
 [[package]]
 name = "wasm-bindgen"

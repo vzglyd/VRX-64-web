@@ -1,5 +1,5 @@
 [package]
-name = "vzglyd-web"
+name = "VRX-64-web"
 version = "0.1.0"
 edition = "2024"
 description = "Browser host for VZGLYD slide bundles"
@@ -31,8 +31,8 @@ web-sys = { version = "0.3", features = [
 ]}
 
 # Kernel
-vzglyd-kernel = { path = "../vzglyd-kernel" }
-vzglyd-slide = { git = "https://github.com/vzglyd/vzglyd-slide" }
+vzglyd_kernel = { package = "VRX-64-kernel", path = "../VRX-64-kernel" }
+vzglyd_slide = { package = "VRX-64-slide", git = "https://github.com/vzglyd/VRX-64-slide" }
 bytemuck = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc", "use-std"] }
 glam = "0.29"
