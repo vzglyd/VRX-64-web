@@ -8,6 +8,87 @@ import { loadGlbScene, encodeMeshAsset, encodeSceneAnchorSet } from '../pkg/vzgl
 
 const WIRE_VERSION = 1;
 const TEXT_ENCODER = new TextEncoder();
+const DEFAULT_FIXED_STEP_MS = 1000 / 60;
+const DEFAULT_MAX_FRAME_DELTA_MS = 50;
+const DEFAULT_MAX_FIXED_UPDATES_PER_FRAME = 4;
+const MAX_INTERPOLATION_ALPHA = 0.999999;
+
+function clampFrameInterval(rawDeltaMs, maxFrameDeltaMs) {
+  return Math.max(0, Math.min(maxFrameDeltaMs, rawDeltaMs));
+}
+
+export function createFixedStepScheduler(config = {}) {
+  return {
+    fixedStepMs: Math.max(0.001, Number(config.fixedStepMs) || DEFAULT_FIXED_STEP_MS),
+    maxFrameDeltaMs: Math.max(0, Number(config.maxFrameDeltaMs) || DEFAULT_MAX_FRAME_DELTA_MS),
+    maxUpdatesPerFrame: Math.max(
+      1,
+      Math.floor(Number(config.maxUpdatesPerFrame) || DEFAULT_MAX_FIXED_UPDATES_PER_FRAME),
+    ),
+    accumulatorMs: 0,
+    simulationTimeMs: 0,
+    lastTimestampMs: null,
+  };
+}
+
+export function resetFixedStepScheduler(scheduler) {
+  scheduler.accumulatorMs = 0;
+  scheduler.simulationTimeMs = 0;
+  scheduler.lastTimestampMs = null;
+  return scheduler;
+}
+
+export function advanceFixedStepScheduler(scheduler, timestampMs, out = {}) {
+  const safeTimestampMs = Number.isFinite(timestampMs)
+    ? timestampMs
+    : (scheduler.lastTimestampMs ?? 0);
+  const lastTimestampMs = scheduler.lastTimestampMs;
+
+  out.fixedStepMs = scheduler.fixedStepMs;
+  out.rawDeltaMs = 0;
+  out.clampedDeltaMs = 0;
+  out.fixedSteps = 0;
+  out.alpha = 0;
+  out.overloadClamped = false;
+  out.accumulatorMs = scheduler.accumulatorMs;
+  out.simulationTimeMs = scheduler.simulationTimeMs;
+  out.renderTimeMs = scheduler.simulationTimeMs;
+
+  scheduler.lastTimestampMs = safeTimestampMs;
+  if (lastTimestampMs == null) {
+    return out;
+  }
+
+  out.rawDeltaMs = Math.max(0, safeTimestampMs - lastTimestampMs);
+  out.clampedDeltaMs = clampFrameInterval(out.rawDeltaMs, scheduler.maxFrameDeltaMs);
+  scheduler.accumulatorMs += out.clampedDeltaMs;
+
+  while (
+    scheduler.accumulatorMs >= scheduler.fixedStepMs &&
+    out.fixedSteps < scheduler.maxUpdatesPerFrame
+  ) {
+    scheduler.accumulatorMs -= scheduler.fixedStepMs;
+    scheduler.simulationTimeMs += scheduler.fixedStepMs;
+    out.fixedSteps += 1;
+  }
+
+  if (scheduler.accumulatorMs >= scheduler.fixedStepMs) {
+    out.overloadClamped = true;
+    scheduler.accumulatorMs = Math.min(
+      scheduler.accumulatorMs,
+      Math.max(0, scheduler.fixedStepMs - 0.0001),
+    );
+  }
+
+  out.accumulatorMs = scheduler.accumulatorMs;
+  out.simulationTimeMs = scheduler.simulationTimeMs;
+  out.alpha = Math.min(
+    MAX_INTERPOLATION_ALPHA,
+    scheduler.fixedStepMs > 0 ? (scheduler.accumulatorMs / scheduler.fixedStepMs) : 0,
+  );
+  out.renderTimeMs = scheduler.simulationTimeMs + scheduler.accumulatorMs;
+  return out;
+}
 
 function encodeRuntimeParams(params) {
   if (params == null) {
@@ -27,6 +108,10 @@ function measureCall(fn) {
     result,
     durationMs: nowMs() - startMs,
   };
+}
+
+function formatTraceMs(value) {
+  return value.toFixed(3);
 }
 
 export function buildSlideTraceContext(pkg, runtimeOptions = null) {
@@ -232,7 +317,6 @@ export class EngineBridge {
     };
 
     this._loaded = false;
-    this._lastTimestampMs = null;
     this._slideName = '';
     this._manifestName = '';
     this._lastError = null;
@@ -243,6 +327,20 @@ export class EngineBridge {
     this._slideTraceThread = 'web.main';
     this._slideTraceArgs = {};
     this._sidecarTraceThread = 'web.sidecar';
+    this._frameScheduler = createFixedStepScheduler();
+    this._frameTiming = {};
+    this._frameSample = {};
+    this._renderTiming = {
+      simulationTimeSecs: 0,
+      alpha: 0,
+      fixedStepSecs: this._frameScheduler.fixedStepMs / 1000,
+      frameTimestampMs: 0,
+    };
+    this._timingDiagnostics = {
+      clampCount: 0,
+      multiStepFrameCount: 0,
+      overloadDropCount: 0,
+    };
     this._frameStats = createFrameStats();
     this._traceRecorder = this._hostConfig?.trace?.enabled
       ? createTraceRecorder({
@@ -254,6 +352,46 @@ export class EngineBridge {
         })
       : null;
     this._traceRecorder?.bindLongTasks('web.main');
+  }
+
+  _isTraceCapturing() {
+    return Boolean(this._traceRecorder?.capturing);
+  }
+
+  _emitTimingDiagnostic(name, args = {}) {
+    const countsByName = {
+      frame_dt_clamped: 'clampCount',
+      frame_multi_step: 'multiStepFrameCount',
+      frame_overload_drop: 'overloadDropCount',
+    };
+    const counterKey = countsByName[name];
+    if (!counterKey) {
+      return;
+    }
+
+    this._timingDiagnostics[counterKey] += 1;
+    const occurrence = this._timingDiagnostics[counterKey];
+
+    if (this._isTraceCapturing()) {
+      this._traceRecorder.instant(
+        this._slideTraceThread,
+        'timing',
+        name,
+        {
+          ...this._slideTraceArgs,
+          occurrence,
+          ...args,
+        },
+      );
+    }
+
+    if (occurrence === 1 || occurrence % 60 === 0) {
+      console.warn(`[vzglyd] ${name}`, {
+        occurrence,
+        slide: this._slideName,
+        ...args,
+      });
+    }
   }
 
   _relayWorkerTrace(event) {
@@ -536,7 +674,16 @@ export class EngineBridge {
 
       this._manifestName = pkg.manifest?.name ?? '';
       this._slideName = spec?.name ?? '';
-      this._lastTimestampMs = null;
+      resetFixedStepScheduler(this._frameScheduler);
+      this._renderTiming.fixedStepSecs = this._frameScheduler.fixedStepMs / 1000;
+      this._renderTiming.simulationTimeSecs = 0;
+      this._renderTiming.alpha = 0;
+      this._renderTiming.frameTimestampMs = 0;
+      this._timingDiagnostics = {
+        clampCount: 0,
+        multiStepFrameCount: 0,
+        overloadDropCount: 0,
+      };
       this._lastError = null;
       this._loaded = true;
       this._traceRecorder?.setMetadata('slide_name', this._slideName);
@@ -669,33 +816,65 @@ export class EngineBridge {
   frame(timestampMs) {
     if (!this._loaded || !this._slideHost || !this._renderer) return;
     const frameStartedMs = nowMs();
-
-    const dt = this._lastTimestampMs == null
-      ? 1 / 60
-      : Math.max(0, Math.min(0.25, (timestampMs - this._lastTimestampMs) / 1000));
-    this._lastTimestampMs = timestampMs;
+    const traceCapturing = this._isTraceCapturing();
     const slideTraceThread = this._slideTraceThread || 'web.main';
-    const slideTraceArgs = this._slideTraceArgs ?? {};
+    const slideTraceArgs = traceCapturing ? (this._slideTraceArgs ?? {}) : null;
+    const frameTiming = advanceFixedStepScheduler(this._frameScheduler, timestampMs, this._frameTiming);
+    const fixedStepSecs = frameTiming.fixedStepMs / 1000;
 
-    const updateStartedMs = nowMs();
-    const updateSample = measureCall(() => this._slideHost.update(dt));
-    const runtimeStatus = updateSample.result;
-    this._traceRecorder?.completeAt(
-      slideTraceThread,
-      'runtime',
-      'vzglyd_update',
-      updateStartedMs,
-      updateSample.durationMs,
-      {
-        ...slideTraceArgs,
-        dt_ms: (dt * 1000).toFixed(3),
-        status_code: runtimeStatus,
-      },
-    );
+    if (frameTiming.rawDeltaMs > frameTiming.clampedDeltaMs) {
+      this._emitTimingDiagnostic('frame_dt_clamped', {
+        raw_dt_ms: frameTiming.rawDeltaMs,
+        clamped_dt_ms: frameTiming.clampedDeltaMs,
+      });
+    }
+    if (frameTiming.fixedSteps > 1) {
+      this._emitTimingDiagnostic('frame_multi_step', {
+        fixed_steps: frameTiming.fixedSteps,
+        raf_dt_ms: frameTiming.rawDeltaMs,
+      });
+    }
+    if (frameTiming.overloadClamped) {
+      this._emitTimingDiagnostic('frame_overload_drop', {
+        fixed_steps: frameTiming.fixedSteps,
+        accumulator_ms: frameTiming.accumulatorMs,
+      });
+    }
+
+    let totalUpdateMs = 0;
+    let runtimeStatus = 0;
     let overlayUploadMs = 0;
     let dynamicUploadMs = 0;
     let overlayUploaded = false;
     let dynamicUploaded = false;
+
+    for (let stepIndex = 0; stepIndex < frameTiming.fixedSteps; stepIndex++) {
+      const updateStartedMs = nowMs();
+      const updateSample = measureCall(() => this._slideHost.update(fixedStepSecs));
+      totalUpdateMs += updateSample.durationMs;
+      if (updateSample.result !== 0) {
+        runtimeStatus = updateSample.result;
+      }
+
+      if (traceCapturing) {
+        this._traceRecorder.completeAt(
+          slideTraceThread,
+          'runtime',
+          'vzglyd_update',
+          updateStartedMs,
+          updateSample.durationMs,
+          {
+            ...slideTraceArgs,
+            dt_ms: formatTraceMs(frameTiming.fixedStepMs),
+            status_code: updateSample.result,
+            step_index: stepIndex + 1,
+            steps_this_frame: frameTiming.fixedSteps,
+            raf_dt_ms: formatTraceMs(frameTiming.rawDeltaMs),
+            clamped_dt_ms: formatTraceMs(frameTiming.clampedDeltaMs),
+          },
+        );
+      }
+    }
 
     if (runtimeStatus !== 0) {
       const overlayStartedMs = nowMs();
@@ -704,18 +883,21 @@ export class EngineBridge {
       );
       overlayUploadMs = overlaySample.durationMs;
       overlayUploaded = overlaySample.result;
-      this._traceRecorder?.completeAt(
-        slideTraceThread,
-        'runtime',
-        'overlay_upload',
-        overlayStartedMs,
-        overlayUploadMs,
-        {
-          ...slideTraceArgs,
-          uploaded: overlayUploaded,
-          status_code: runtimeStatus,
-        },
-      );
+      if (traceCapturing) {
+        this._traceRecorder.completeAt(
+          slideTraceThread,
+          'runtime',
+          'overlay_upload',
+          overlayStartedMs,
+          overlayUploadMs,
+          {
+            ...slideTraceArgs,
+            uploaded: overlayUploaded,
+            status_code: runtimeStatus,
+            fixed_steps: frameTiming.fixedSteps,
+          },
+        );
+      }
 
       const dynamicStartedMs = nowMs();
       const dynamicSample = measureCall(() =>
@@ -723,55 +905,81 @@ export class EngineBridge {
       );
       dynamicUploadMs = dynamicSample.durationMs;
       dynamicUploaded = dynamicSample.result;
-      this._traceRecorder?.completeAt(
+      if (traceCapturing) {
+        this._traceRecorder.completeAt(
+          slideTraceThread,
+          'runtime',
+          'dynamic_upload',
+          dynamicStartedMs,
+          dynamicUploadMs,
+          {
+            ...slideTraceArgs,
+            uploaded: dynamicUploaded,
+            status_code: runtimeStatus,
+            fixed_steps: frameTiming.fixedSteps,
+          },
+        );
+      }
+    }
+
+    this._renderTiming.simulationTimeSecs = frameTiming.simulationTimeMs / 1000;
+    this._renderTiming.alpha = frameTiming.alpha;
+    this._renderTiming.fixedStepSecs = fixedStepSecs;
+    this._renderTiming.frameTimestampMs = timestampMs;
+
+    const renderStartedMs = nowMs();
+    const renderSample = measureCall(() => this._renderer.renderFrame(this._renderTiming));
+    if (traceCapturing) {
+      this._traceRecorder.completeAt(
         slideTraceThread,
-        'runtime',
-        'dynamic_upload',
-        dynamicStartedMs,
-        dynamicUploadMs,
+        'render',
+        'render_frame',
+        renderStartedMs,
+        renderSample.durationMs,
         {
           ...slideTraceArgs,
-          uploaded: dynamicUploaded,
-          status_code: runtimeStatus,
+          raf_dt_ms: formatTraceMs(frameTiming.rawDeltaMs),
+          clamped_dt_ms: formatTraceMs(frameTiming.clampedDeltaMs),
+          fixed_steps: frameTiming.fixedSteps,
+          alpha: frameTiming.alpha.toFixed(3),
+          simulation_time_ms: formatTraceMs(frameTiming.simulationTimeMs),
         },
       );
     }
 
-    const renderStartedMs = nowMs();
-    const renderSample = measureCall(() => this._renderer.renderFrame(dt));
-    this._traceRecorder?.completeAt(
-      slideTraceThread,
-      'render',
-      'render_frame',
-      renderStartedMs,
-      renderSample.durationMs,
-      {
-        ...slideTraceArgs,
-        dt_ms: (dt * 1000).toFixed(3),
-      },
-    );
-    recordFrameStats(this._frameStats, {
-      updateMs: updateSample.durationMs,
-      overlayUploadMs,
-      dynamicUploadMs,
-      renderMs: renderSample.durationMs,
-      overlayUploaded,
-      dynamicUploaded,
-    });
-    this._traceRecorder?.completeAt(
-      slideTraceThread,
-      'frame',
-      'frame',
-      frameStartedMs,
-      nowMs() - frameStartedMs,
-      {
-        ...slideTraceArgs,
-        runtime_status: runtimeStatus,
-        overlay_uploaded: overlayUploaded,
-        dynamic_uploaded: dynamicUploaded,
-        slide: this._slideName,
-      },
-    );
+    this._frameSample.rafDtMs = frameTiming.rawDeltaMs;
+    this._frameSample.fixedSteps = frameTiming.fixedSteps;
+    this._frameSample.updateMs = totalUpdateMs;
+    this._frameSample.overlayUploadMs = overlayUploadMs;
+    this._frameSample.dynamicUploadMs = dynamicUploadMs;
+    this._frameSample.renderMs = renderSample.durationMs;
+    this._frameSample.overlayUploaded = overlayUploaded;
+    this._frameSample.dynamicUploaded = dynamicUploaded;
+    this._frameSample.clamped = frameTiming.rawDeltaMs > frameTiming.clampedDeltaMs;
+    this._frameSample.overloadClamped = frameTiming.overloadClamped;
+    recordFrameStats(this._frameStats, this._frameSample);
+
+    if (traceCapturing) {
+      this._traceRecorder.completeAt(
+        slideTraceThread,
+        'frame',
+        'frame',
+        frameStartedMs,
+        nowMs() - frameStartedMs,
+        {
+          ...slideTraceArgs,
+          runtime_status: runtimeStatus,
+          overlay_uploaded: overlayUploaded,
+          dynamic_uploaded: dynamicUploaded,
+          slide: this._slideName,
+          raf_dt_ms: formatTraceMs(frameTiming.rawDeltaMs),
+          clamped_dt_ms: formatTraceMs(frameTiming.clampedDeltaMs),
+          fixed_steps: frameTiming.fixedSteps,
+          alpha: frameTiming.alpha.toFixed(3),
+          overload_clamped: frameTiming.overloadClamped,
+        },
+      );
+    }
   }
 
   teardown() {
@@ -791,13 +999,22 @@ export class EngineBridge {
     this._slideHost = null;
     this._sidecarHost = null;
     this._loaded = false;
-    this._lastTimestampMs = null;
+    resetFixedStepScheduler(this._frameScheduler);
+    this._renderTiming.simulationTimeSecs = 0;
+    this._renderTiming.alpha = 0;
+    this._renderTiming.fixedStepSecs = this._frameScheduler.fixedStepMs / 1000;
+    this._renderTiming.frameTimestampMs = 0;
     this._compiledSceneMeshes = [];
     this._compiledSceneCameraPath = null;
     this._compiledSceneLighting = null;
     this._slideTraceThread = 'web.main';
     this._slideTraceArgs = {};
     this._sidecarTraceThread = 'web.sidecar';
+    this._timingDiagnostics = {
+      clampCount: 0,
+      multiStepFrameCount: 0,
+      overloadDropCount: 0,
+    };
     this._frameStats = createFrameStats();
   }
 
@@ -811,6 +1028,7 @@ export class EngineBridge {
       sidecarActive: Boolean(this._sidecarHost),
       traceCapturing: this._traceRecorder?.capturing ?? false,
       lastError: this._lastError,
+      fixedStepMs: this._frameScheduler.fixedStepMs,
       ...this._frameStats,
     };
   }

@@ -225,12 +225,7 @@ fn fs_main(in: VzglydVertexOutput) -> @location(0) vec4<f32> {
 
 // ── Matrix math (column-major, WebGPU convention) ─────────────────────────────
 
-function mat4Identity() {
-  return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
-}
-
-function mat4Mul(a, b) {
-  const out = new Float32Array(16);
+function mat4MulInto(out, a, b) {
   for (let col = 0; col < 4; col++) {
     for (let row = 0; row < 4; row++) {
       let sum = 0;
@@ -242,20 +237,30 @@ function mat4Mul(a, b) {
 }
 
 /** Standard perspective projection (right-handed, depth 0..1). */
-function mat4Perspective(fovYRad, aspect, near, far) {
+function mat4PerspectiveInto(out, fovYRad, aspect, near, far) {
   const f = 1.0 / Math.tan(fovYRad / 2);
   const nf = 1 / (near - far);
-  // column-major
-  return new Float32Array([
-    f / aspect, 0, 0, 0,
-    0,          f, 0, 0,
-    0,          0, (far) * nf,       -1,
-    0,          0, (far * near) * nf,  0,
-  ]);
+  out[0] = f / aspect;
+  out[1] = 0;
+  out[2] = 0;
+  out[3] = 0;
+  out[4] = 0;
+  out[5] = f;
+  out[6] = 0;
+  out[7] = 0;
+  out[8] = 0;
+  out[9] = 0;
+  out[10] = far * nf;
+  out[11] = -1;
+  out[12] = 0;
+  out[13] = 0;
+  out[14] = (far * near) * nf;
+  out[15] = 0;
+  return out;
 }
 
 /** Standard lookAt view matrix (right-handed). */
-function mat4LookAt(eye, center, up) {
+function mat4LookAtInto(out, eye, center, up) {
   const [ex, ey, ez] = eye;
   const [cx, cy, cz] = center;
   const [ux, uy, uz] = up;
@@ -270,36 +275,60 @@ function mat4LookAt(eye, center, up) {
 
   const rx = sy * fz - sz * fy, ry = sz * fx - sx * fz, rz = sx * fy - sy * fx;
 
-  // column-major view matrix
-  return new Float32Array([
-     sx,  rx, -fx, 0,
-     sy,  ry, -fy, 0,
-     sz,  rz, -fz, 0,
-    -(sx*ex + sy*ey + sz*ez), -(rx*ex + ry*ey + rz*ez), fx*ex + fy*ey + fz*ez, 1,
-  ]);
+  out[0] = sx;
+  out[1] = rx;
+  out[2] = -fx;
+  out[3] = 0;
+  out[4] = sy;
+  out[5] = ry;
+  out[6] = -fy;
+  out[7] = 0;
+  out[8] = sz;
+  out[9] = rz;
+  out[10] = -fz;
+  out[11] = 0;
+  out[12] = -(sx * ex + sy * ey + sz * ez);
+  out[13] = -(rx * ex + ry * ey + rz * ez);
+  out[14] = fx * ex + fy * ey + fz * ez;
+  out[15] = 1;
+  return out;
 }
 
-function normalize3(v) {
-  const len = Math.hypot(v[0], v[1], v[2]);
-  if (len === 0) return [0, 1, 0];
-  return [v[0]/len, v[1]/len, v[2]/len];
+function setVec3(out, src) {
+  out[0] = src[0];
+  out[1] = src[1];
+  out[2] = src[2];
+  return out;
+}
+
+function normalize3Into(out, x, y, z) {
+  const len = Math.hypot(x, y, z);
+  if (len === 0) {
+    out[0] = 0;
+    out[1] = 1;
+    out[2] = 0;
+    return out;
+  }
+  out[0] = x / len;
+  out[1] = y / len;
+  out[2] = z / len;
+  return out;
 }
 
 function lerp(a, b, t) { return a + (b - a) * t; }
 
-function lerpVec3(a, b, t) {
-  return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
-}
-
 // ── Melbourne clock helper ────────────────────────────────────────────────────
 
-function melbourneClockSeconds() {
-  const now = new Date();
+function melbourneClockSeconds(nowMs) {
+  if (!Number.isFinite(nowMs)) {
+    return 0;
+  }
+  const now = new Date(nowMs);
   // AEST = UTC+10, AEDT = UTC+11 (Oct–Apr approx)
   const month = now.getUTCMonth(); // 0-based
   const isDst = month >= 9 || month <= 3; // Oct(9)..Mar(3) approximate
   const offsetMs = (isDst ? 11 : 10) * 3600_000;
-  const localMs  = (now.getTime() + offsetMs) % 86_400_000;
+  const localMs  = (nowMs + offsetMs) % 86_400_000;
   return localMs / 1000;
 }
 
@@ -399,9 +428,24 @@ function createStaticMeshBuffers(device, meshes, sceneSpace, labelPrefix) {
 
 // ── Camera interpolation ──────────────────────────────────────────────────────
 
-function sampleCamera(cameraPath, elapsed) {
+const DEFAULT_CAMERA_SAMPLE = {
+  position: [0, 1, 3],
+  target: [0, 0, 0],
+  up: [0, 1, 0],
+  fov_y_deg: 60,
+};
+
+function copyCameraSample(out, sample) {
+  setVec3(out.position, sample.position);
+  setVec3(out.target, sample.target);
+  setVec3(out.up, sample.up);
+  out.fov_y_deg = sample.fov_y_deg;
+  return out;
+}
+
+function sampleCameraInto(out, cameraPath, elapsed) {
   if (!cameraPath || cameraPath.keyframes.length === 0) {
-    return { position: [0, 1, 3], target: [0, 0, 0], up: [0, 1, 0], fov_y_deg: 60 };
+    return copyCameraSample(out, DEFAULT_CAMERA_SAMPLE);
   }
 
   const kf = cameraPath.keyframes;
@@ -414,23 +458,38 @@ function sampleCamera(cameraPath, elapsed) {
     t = Math.min(t, kf[kf.length - 1].time);
   }
 
-  if (t <= kf[0].time)            return kf[0];
-  if (t >= kf[kf.length - 1].time) return kf[kf.length - 1];
+  if (t <= kf[0].time) return copyCameraSample(out, kf[0]);
+  if (t >= kf[kf.length - 1].time) return copyCameraSample(out, kf[kf.length - 1]);
 
   for (let i = 0; i < kf.length - 1; i++) {
     const a = kf[i], b = kf[i + 1];
     if (t >= a.time && t <= b.time) {
       const alpha = (b.time === a.time) ? 0 : (t - a.time) / (b.time - a.time);
-      return {
-        position:  lerpVec3(a.position, b.position, alpha),
-        target:    lerpVec3(a.target,   b.target,   alpha),
-        up:        normalize3(lerpVec3(a.up, b.up, alpha)),
-        fov_y_deg: lerp(a.fov_y_deg, b.fov_y_deg, alpha),
-      };
+      out.position[0] = lerp(a.position[0], b.position[0], alpha);
+      out.position[1] = lerp(a.position[1], b.position[1], alpha);
+      out.position[2] = lerp(a.position[2], b.position[2], alpha);
+      out.target[0] = lerp(a.target[0], b.target[0], alpha);
+      out.target[1] = lerp(a.target[1], b.target[1], alpha);
+      out.target[2] = lerp(a.target[2], b.target[2], alpha);
+      normalize3Into(
+        out.up,
+        lerp(a.up[0], b.up[0], alpha),
+        lerp(a.up[1], b.up[1], alpha),
+        lerp(a.up[2], b.up[2], alpha),
+      );
+      out.fov_y_deg = lerp(a.fov_y_deg, b.fov_y_deg, alpha);
+      return out;
     }
   }
 
-  return kf[kf.length - 1];
+  return copyCameraSample(out, kf[kf.length - 1]);
+}
+
+export function computeRenderTimeSeconds(simulationTimeSecs, alpha, fixedStepSecs) {
+  const safeSimulationTimeSecs = Number.isFinite(simulationTimeSecs) ? simulationTimeSecs : 0;
+  const safeFixedStepSecs = Number.isFinite(fixedStepSecs) ? Math.max(0, fixedStepSecs) : 0;
+  const safeAlpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 0;
+  return safeSimulationTimeSecs + (safeAlpha * safeFixedStepSecs);
 }
 
 // ── Bind group layout definitions ─────────────────────────────────────────────
@@ -888,12 +947,56 @@ export class VzglydRenderer {
     this._dynamicMeshFingerprint = null;
     this._backgroundWorld = null;
 
-    this._elapsed       = 0;
-    this._frameCount    = 0;
-    this._fpsLastTime   = 0;
-    this._fps           = 0;
-    this._rafId         = null;
-    this._onFps         = null; // optional callback(fps)
+    this._screen2DUniformData = new Float32Array(4);
+    this._worldUniformData = new Float32Array(40);
+    this._viewMatrix = new Float32Array(16);
+    this._projectionMatrix = new Float32Array(16);
+    this._viewProjectionMatrix = new Float32Array(16);
+    this._cameraSample = {
+      position: [0, 1, 3],
+      target: [0, 0, 0],
+      up: [0, 1, 0],
+      fov_y_deg: 60,
+    };
+
+    this._frameCount = 0;
+    this._fpsLastTime = 0;
+    this._fps = 0;
+    this._onFps = null; // optional callback(fps)
+
+    this._clearColor = { r: 0, g: 0, b: 0, a: 1 };
+    this._backgroundColorAttachment = {
+      view: null,
+      clearValue: this._clearColor,
+      loadOp: 'clear',
+      storeOp: 'store',
+    };
+    this._backgroundDepthAttachment = {
+      view: null,
+      depthClearValue: 1.0,
+      depthLoadOp: 'clear',
+      depthStoreOp: 'store',
+    };
+    this._mainColorAttachment = {
+      view: null,
+      clearValue: this._clearColor,
+      loadOp: 'clear',
+      storeOp: 'store',
+    };
+    this._mainDepthAttachment = {
+      view: null,
+      depthClearValue: 1.0,
+      depthLoadOp: 'clear',
+      depthStoreOp: 'store',
+    };
+    this._backgroundPassDescriptor = {
+      colorAttachments: [this._backgroundColorAttachment],
+      depthStencilAttachment: this._backgroundDepthAttachment,
+    };
+    this._mainPassDescriptor = {
+      colorAttachments: [this._mainColorAttachment],
+      depthStencilAttachment: this._mainDepthAttachment,
+    };
   }
 
   /** Must be called before render(). Returns false if WebGPU is unavailable. */
@@ -1207,6 +1310,8 @@ export class VzglydRenderer {
       usage:  GPUTextureUsage.RENDER_ATTACHMENT,
     });
     this._depthView = this._depthTexture.createView();
+    this._backgroundDepthAttachment.view = this._depthView;
+    this._mainDepthAttachment.view = this._depthView;
   }
 
   _configureContext() {
@@ -1304,17 +1409,27 @@ export class VzglydRenderer {
   // ── Uniform updates ────────────────────────────────────────────────────────
 
   _writeScreen2DUniforms(elapsed) {
-    const data = new Float32Array([elapsed, 0, 0, 0]);
+    const data = this._screen2DUniformData;
+    data[0] = elapsed;
+    data[1] = 0;
+    data[2] = 0;
+    data[3] = 0;
     this._queue.writeBuffer(this._uniformBuf, 0, data);
   }
 
-  _writeWorldUniforms(spec, uniformBuf, elapsed) {
-    const cam    = sampleCamera(spec.camera_path, elapsed);
+  _writeWorldUniforms(spec, uniformBuf, elapsed, wallClockMs) {
+    const cam = sampleCameraInto(this._cameraSample, spec.camera_path, elapsed);
     const aspect = this._canvas.width / this._canvas.height;
 
-    const view     = mat4LookAt(cam.position, cam.target, cam.up);
-    const proj     = mat4Perspective(cam.fov_y_deg * Math.PI / 180, aspect, 0.15, 180.0);
-    const viewProj = mat4Mul(proj, view);
+    const view = mat4LookAtInto(this._viewMatrix, cam.position, cam.target, cam.up);
+    const proj = mat4PerspectiveInto(
+      this._projectionMatrix,
+      cam.fov_y_deg * Math.PI / 180,
+      aspect,
+      0.15,
+      180.0,
+    );
+    const viewProj = mat4MulInto(this._viewProjectionMatrix, proj, view);
 
     const lighting = spec.lighting ?? {
       ambient_color:     [1, 1, 1],
@@ -1323,22 +1438,8 @@ export class VzglydRenderer {
     };
 
     const ambIntensity = Math.max(0, lighting.ambient_intensity);
-    const ambLight = [
-      lighting.ambient_color[0] * ambIntensity,
-      lighting.ambient_color[1] * ambIntensity,
-      lighting.ambient_color[2] * ambIntensity,
-      0,
-    ];
-
     const dl = lighting.directional_light;
-    const mainLightDir = dl
-      ? [...normalize3(dl.direction), 1.0]
-      : [0, 1, 0, 0];
-    const mainLightColor = dl
-      ? [dl.color[0] * dl.intensity, dl.color[1] * dl.intensity, dl.color[2] * dl.intensity, 0]
-      : [0, 0, 0, 0];
-
-    const data = new Float32Array(40); // 160 bytes = 40 f32
+    const data = this._worldUniformData; // 160 bytes = 40 f32
     // view_proj (col-major mat4): indices 0-15
     data.set(viewProj, 0);
     // cam_pos: 16-18, time: 19
@@ -1351,25 +1452,56 @@ export class VzglydRenderer {
     // fog_start: 24, fog_end: 25, clock_seconds: 26, _pad: 27
     data[24] = 18.0;
     data[25] = 75.0;
-    data[26] = melbourneClockSeconds();
+    data[26] = melbourneClockSeconds(wallClockMs);
     data[27] = 0;
     // ambient_light: 28-31
-    data.set(ambLight, 28);
+    data[28] = lighting.ambient_color[0] * ambIntensity;
+    data[29] = lighting.ambient_color[1] * ambIntensity;
+    data[30] = lighting.ambient_color[2] * ambIntensity;
+    data[31] = 0;
     // main_light_dir: 32-35
-    data.set(mainLightDir, 32);
-    // main_light_color: 36-39
-    data.set(mainLightColor, 36);
+    if (dl) {
+      const mainLightLength = Math.hypot(dl.direction[0], dl.direction[1], dl.direction[2]);
+      if (mainLightLength === 0) {
+        data[32] = 0;
+        data[33] = 1;
+        data[34] = 0;
+      } else {
+        data[32] = dl.direction[0] / mainLightLength;
+        data[33] = dl.direction[1] / mainLightLength;
+        data[34] = dl.direction[2] / mainLightLength;
+      }
+      data[35] = 1.0;
+      data[36] = dl.color[0] * dl.intensity;
+      data[37] = dl.color[1] * dl.intensity;
+      data[38] = dl.color[2] * dl.intensity;
+      data[39] = 0;
+    } else {
+      data[32] = 0;
+      data[33] = 1;
+      data[34] = 0;
+      data[35] = 0;
+      data[36] = 0;
+      data[37] = 0;
+      data[38] = 0;
+      data[39] = 0;
+    }
 
     this._queue.writeBuffer(uniformBuf, 0, data);
   }
 
-  _writeWorld3DUniforms(elapsed) {
-    this._writeWorldUniforms(this._spec, this._uniformBuf, elapsed);
+  _writeWorld3DUniforms(elapsed, wallClockMs) {
+    this._writeWorldUniforms(this._spec, this._uniformBuf, elapsed, wallClockMs);
   }
 
-  _writeHybridWorldBackgroundUniforms(elapsed) {
+  _writeHybridWorldBackgroundUniforms(elapsed, wallClockMs) {
     if (!this._backgroundWorld) return;
-    this._writeWorldUniforms(this._backgroundWorld.spec, this._backgroundWorld.uniformBuf, elapsed);
+    this._writeWorldUniforms(
+      this._backgroundWorld.spec,
+      this._backgroundWorld.uniformBuf,
+      elapsed,
+      wallClockMs,
+    );
   }
 
   _renderDrawList(renderPass, pipelines, bindGroup, draws, staticBufs, dynamicBufs = null) {
@@ -1399,30 +1531,45 @@ export class VzglydRenderer {
 
   // ── Render pass ────────────────────────────────────────────────────────────
 
-  renderFrame(dt) {
+  renderFrame(frameTiming = {}) {
     if (!this._ensureCanvasConfigured()) {
       return;
     }
 
-    this._elapsed += dt;
+    const simulationTimeSecs = Number.isFinite(frameTiming.simulationTimeSecs)
+      ? frameTiming.simulationTimeSecs
+      : 0;
+    const fixedStepSecs = Number.isFinite(frameTiming.fixedStepSecs)
+      ? Math.max(0, frameTiming.fixedStepSecs)
+      : 0;
+    const frameTimestampMs = Number.isFinite(frameTiming.frameTimestampMs)
+      ? frameTiming.frameTimestampMs
+      : 0;
+    const renderTimeSecs = computeRenderTimeSeconds(
+      simulationTimeSecs,
+      frameTiming.alpha,
+      fixedStepSecs,
+    );
+    const wallClockMs = (globalThis.performance?.timeOrigin ?? 0) + frameTimestampMs;
 
     const spec = this._spec;
     if (this._backgroundWorld) {
-      this._writeHybridWorldBackgroundUniforms(this._elapsed);
+      this._writeHybridWorldBackgroundUniforms(renderTimeSecs, wallClockMs);
     }
     if (spec.scene_space === 'Screen2D') {
-      this._writeScreen2DUniforms(this._elapsed);
+      this._writeScreen2DUniforms(renderTimeSecs);
     } else {
-      this._writeWorld3DUniforms(this._elapsed);
+      this._writeWorld3DUniforms(renderTimeSecs, wallClockMs);
     }
 
     // FPS counter
     this._frameCount++;
-    const now = performance.now();
-    if (now - this._fpsLastTime >= 500) {
-      this._fps = Math.round(this._frameCount / ((now - this._fpsLastTime) / 1000));
+    if (this._fpsLastTime === 0) {
+      this._fpsLastTime = frameTimestampMs;
+    } else if (frameTimestampMs - this._fpsLastTime >= 500) {
+      this._fps = Math.round(this._frameCount / ((frameTimestampMs - this._fpsLastTime) / 1000));
       this._frameCount = 0;
-      this._fpsLastTime = now;
+      this._fpsLastTime = frameTimestampMs;
       if (this._onFps) this._onFps(this._fps);
     }
 
@@ -1432,20 +1579,9 @@ export class VzglydRenderer {
     const colorView = colorTex.createView();
 
     if (this._backgroundWorld) {
-      const backgroundPass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view:       colorView,
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
-          loadOp:     'clear',
-          storeOp:    'store',
-        }],
-        depthStencilAttachment: {
-          view:              this._depthView,
-          depthClearValue:   1.0,
-          depthLoadOp:       'clear',
-          depthStoreOp:      'store',
-        },
-      });
+      this._backgroundColorAttachment.view = colorView;
+      this._backgroundDepthAttachment.view = this._depthView;
+      const backgroundPass = encoder.beginRenderPass(this._backgroundPassDescriptor);
       this._renderDrawList(
         backgroundPass,
         this._backgroundWorld.pipelines,
@@ -1456,20 +1592,10 @@ export class VzglydRenderer {
       backgroundPass.end();
     }
 
-    const renderPass = encoder.beginRenderPass({
-      colorAttachments: [{
-        view:       colorView,
-        clearValue: { r: 0, g: 0, b: 0, a: 1 },
-        loadOp:     this._backgroundWorld ? 'load' : 'clear',
-        storeOp:    'store',
-      }],
-      depthStencilAttachment: {
-        view:              this._depthView,
-        depthClearValue:   1.0,
-        depthLoadOp:       'clear',
-        depthStoreOp:      'store',
-      },
-    });
+    this._mainColorAttachment.view = colorView;
+    this._mainColorAttachment.loadOp = this._backgroundWorld ? 'load' : 'clear';
+    this._mainDepthAttachment.view = this._depthView;
+    const renderPass = encoder.beginRenderPass(this._mainPassDescriptor);
 
     this._renderDrawList(renderPass, this._pipelines, this._bindGroup, spec.draws, this._staticBufs, this._dynamicBufs);
 
@@ -1486,7 +1612,7 @@ export class VzglydRenderer {
   }
 
   stop() {
-    if (this._rafId !== null) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+    // Renderer frame ownership stays in view.js; nothing to stop here.
   }
 
   get fps() {

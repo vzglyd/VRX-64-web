@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  computeRenderTimeSeconds,
   normalizeCustomShaderBody,
   shouldUploadRuntimeBytes,
 } from './renderer.js';
@@ -113,4 +114,10 @@ test('uploads runtime bytes again when the payload changes', () => {
 
   assert.equal(second.shouldUpload, true);
   assert.notEqual(second.fingerprint, first.fingerprint);
+});
+
+test('derives interpolated render time from simulation time and alpha', () => {
+  assert.equal(computeRenderTimeSeconds(10, 0.5, 1 / 60), 10 + (1 / 120));
+  assert.equal(computeRenderTimeSeconds(10, 5, 1 / 60), 10 + (1 / 60));
+  assert.equal(computeRenderTimeSeconds(10, -1, 1 / 60), 10);
 });

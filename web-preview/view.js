@@ -26,7 +26,7 @@ const state = {
   repo: null,
   schedule: [],
   currentIndex: 0,
-  slideStartedAtMs: 0,
+  slideStartedAtMs: null,
   advancing: false,
   sessionToken: 0,
 };
@@ -71,12 +71,12 @@ class HostSlot {
     }
   }
 
-  async load(entry, bundle) {
+  async load(entry, bundle, slideIndex = state.currentIndex) {
     const token = ++this.loadToken;
     await this.ensureHost();
     await this.host.loadBundle(bundle.bytes, {
       params: entry.params ?? null,
-      slideIndex: state.currentIndex,
+      slideIndex,
       slidePath: entry.path ?? '',
     });
 
@@ -240,7 +240,7 @@ function resetPlaybackState() {
   state.repo = null;
   state.schedule = [];
   state.currentIndex = 0;
-  state.slideStartedAtMs = 0;
+  state.slideStartedAtMs = null;
   state.advancing = false;
   playerHost.teardown();
   syncTraceUi();
@@ -291,13 +291,13 @@ async function advanceSlide() {
       return;
     }
 
-    await playerHost.load(nextEntry, bundle);
+    await playerHost.load(nextEntry, bundle, nextIndex);
     if (sessionToken !== state.sessionToken) {
       return;
     }
 
     state.currentIndex = nextIndex;
-    state.slideStartedAtMs = performance.now();
+    state.slideStartedAtMs = null;
   } catch (error) {
     if (sessionToken !== state.sessionToken) {
       return;
@@ -312,6 +312,11 @@ async function advanceSlide() {
 
 function maybeAdvanceSlide(timestampMs) {
   if (state.advancing || state.schedule.length <= 1) {
+    return;
+  }
+
+  if (state.slideStartedAtMs == null) {
+    state.slideStartedAtMs = timestampMs;
     return;
   }
 
@@ -386,14 +391,10 @@ async function bootPlayer(repoBaseUrl, requestedStartIndex) {
       return;
     }
 
-    await playerHost.load(currentEntry, currentBundle);
+    await playerHost.load(currentEntry, currentBundle, state.currentIndex);
     if (sessionToken !== state.sessionToken) {
       return;
     }
-
-    const now = performance.now();
-    playerHost.frame(now);
-    state.slideStartedAtMs = now;
 
     hideOverlay();
     syncTraceUi();
