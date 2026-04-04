@@ -755,7 +755,6 @@ export class EngineBridge {
       slideName: this._slideName,
       manifestName: this._manifestName,
       sidecarActive: Boolean(this._sidecarHost),
-      traceSessionId: this._traceRecorder?.sessionId ?? null,
       traceCapturing: this._traceRecorder?.capturing ?? false,
       lastError: this._lastError,
       ...this._frameStats,
