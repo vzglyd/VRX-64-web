@@ -76,6 +76,8 @@ class HostSlot {
     await this.ensureHost();
     await this.host.loadBundle(bundle.bytes, {
       params: entry.params ?? null,
+      slideIndex: state.currentIndex,
+      slidePath: entry.path ?? '',
     });
 
     if (token !== this.loadToken) {

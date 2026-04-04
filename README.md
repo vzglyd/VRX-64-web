@@ -79,6 +79,10 @@ Tracing is built into the runtime boundaries. The canonical profiling target is 
 
 `host.startTraceCapture()`, `host.stopTraceCapture()`, `host.exportTrace()`, and `host.downloadTrace()` are available from JS. Passing `?trace=1` to `view.html` auto-starts capture, but the button path is the normal workflow.
 
+Tracing is viewer-wide: every slide loaded through `view.html` gets host spans for load, update,
+uploads, and render work. Slides and sidecars can add their own guest scopes on top, but the base
+player timings are available even when a guest has not been upgraded yet.
+
 Slide-local preview pages should redirect into `web-preview/view.html` rather than carrying their own browser runtime shell.
 
 ## Shared Repo Contract

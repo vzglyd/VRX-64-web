@@ -29,6 +29,27 @@ function measureCall(fn) {
   };
 }
 
+export function buildSlideTraceContext(pkg, runtimeOptions = null) {
+  const slidePath = String(runtimeOptions?.slidePath ?? '');
+  const slideIndex = Number.isInteger(runtimeOptions?.slideIndex) ? runtimeOptions.slideIndex : null;
+  const runtimeLabel = slidePath || pkg.manifest?.name || 'guest';
+  const thread = slideIndex == null
+    ? `slide:${runtimeLabel}`
+    : `slide:${slideIndex}:${runtimeLabel}`;
+  const args = {};
+  if (slidePath) {
+    args.slide_path = slidePath;
+  }
+  if (slideIndex != null) {
+    args.slide_index = slideIndex;
+  }
+  return {
+    thread,
+    args,
+    sidecarThread: thread.replace(/^slide:/, 'sidecar:'),
+  };
+}
+
 function toWorldLightingSpec(compiledLighting, fallbackLighting = null) {
   if (!compiledLighting?.directional_light && !fallbackLighting) return null;
 
@@ -96,6 +117,7 @@ class SidecarWorkerRuntime {
     this._channelState = options.channelState;
     this._networkPolicy = options.networkPolicy ?? 'any_https';
     this._endpointMap = options.endpointMap ?? {};
+    this._traceThread = options.traceThread ?? 'sidecar:guest';
     this._onTrace = options.onTrace ?? null;
     this._worker = null;
   }
@@ -150,6 +172,7 @@ class SidecarWorkerRuntime {
       paramsBytes,
       networkPolicy: this._networkPolicy,
       endpointMap: this._endpointMap,
+      traceThread: this._traceThread,
     };
     const transfer = [wasmBytes.buffer];
     if (paramsBytes) {
@@ -217,6 +240,9 @@ export class EngineBridge {
     this._compiledSceneMeshes = [];
     this._compiledSceneCameraPath = null;
     this._compiledSceneLighting = null;
+    this._slideTraceThread = 'web.main';
+    this._slideTraceArgs = {};
+    this._sidecarTraceThread = 'web.sidecar';
     this._frameStats = createFrameStats();
     this._traceRecorder = this._hostConfig?.trace?.enabled
       ? createTraceRecorder({
@@ -280,11 +306,15 @@ export class EngineBridge {
     try {
       const bytes = asUint8Array(bundleBytes);
       const pkg = unpackBundle(bytes);
+      const slideTrace = buildSlideTraceContext(pkg, runtimeOptions);
       const traceMetadata = {
         bundle_bytes: bytes.length,
         manifest_name: pkg.manifest?.name ?? '',
         manifest_version: pkg.manifest?.version ?? '',
         has_sidecar: Boolean(pkg.sidecarWasm),
+        slide_path: slideTrace.args.slide_path ?? '',
+        slide_index: slideTrace.args.slide_index ?? '',
+        slide_thread: slideTrace.thread,
       };
       if (this._traceRecorder) {
         for (const [key, value] of Object.entries(traceMetadata)) {
@@ -302,12 +332,13 @@ export class EngineBridge {
         const compileStartedMs = nowMs();
         await this.compileAuthoredScenes(pkg.manifest, pkg.miscAssets, meshAssets, sceneMetadata);
         this._traceRecorder?.completeAt(
-          'web.main',
+          slideTrace.thread,
           'bundle',
           'compile_authored_scenes',
           compileStartedMs,
           nowMs() - compileStartedMs,
           {
+            ...slideTrace.args,
             scene_count: pkg.manifest.assets.scenes.length,
             compiled_meshes: this._compiledSceneMeshes.length,
           },
@@ -319,7 +350,7 @@ export class EngineBridge {
         meshAssets,
         sceneMetadata,
         traceRecorder: this._traceRecorder,
-        traceThread: `slide:${pkg.manifest?.name ?? 'guest'}`,
+        traceThread: slideTrace.thread,
         traceCategory: 'guest.slide',
       });
       const paramsBytes = encodeRuntimeParams(runtimeOptions?.params);
@@ -330,12 +361,13 @@ export class EngineBridge {
       const instantiateStartedMs = nowMs();
       const slideModule = await WebAssembly.instantiate(pkg.slideWasm, slideHost.buildImports());
       this._traceRecorder?.completeAt(
-        'web.main',
+        slideTrace.thread,
         'bundle',
         'instantiate_slide',
         instantiateStartedMs,
         nowMs() - instantiateStartedMs,
         {
+          ...slideTrace.args,
           wasm_bytes: pkg.slideWasm.length,
         },
       );
@@ -345,12 +377,13 @@ export class EngineBridge {
       slideHost.runStart();
       slideHost.configureParams(paramsBytes);
       this._traceRecorder?.completeAt(
-        'web.main',
+        slideTrace.thread,
         'bundle',
         'configure_slide',
         runtimeInitStartedMs,
         nowMs() - runtimeInitStartedMs,
         {
+          ...slideTrace.args,
           has_params: Boolean(paramsBytes),
         },
       );
@@ -362,11 +395,12 @@ export class EngineBridge {
       const initStartedMs = nowMs();
       slideHost.runInit();
       this._traceRecorder?.completeAt(
-        'web.main',
+        slideTrace.thread,
         'bundle',
         'vzglyd_init',
         initStartedMs,
         nowMs() - initStartedMs,
+        slideTrace.args,
       );
 
       const specReadStartedMs = nowMs();
@@ -377,12 +411,13 @@ export class EngineBridge {
 
       let spec = decodeSlideSpec(specWire.slice(1));
       this._traceRecorder?.completeAt(
-        'web.main',
+        slideTrace.thread,
         'bundle',
         'decode_spec',
         specReadStartedMs,
         nowMs() - specReadStartedMs,
         {
+          ...slideTrace.args,
           spec_bytes: specWire.length,
           scene_space: spec.scene_space,
         },
@@ -427,12 +462,13 @@ export class EngineBridge {
       this._gpuState = renderer.gpuState();
       this._frameStats = createFrameStats();
       this._traceRecorder?.completeAt(
-        'web.main',
+        slideTrace.thread,
         'bundle',
         'renderer_init',
         rendererInitStartedMs,
         nowMs() - rendererInitStartedMs,
         {
+          ...slideTrace.args,
           canvas_width: this._canvas.width,
           canvas_height: this._canvas.height,
           dpr: globalThis.devicePixelRatio ?? 1,
@@ -442,24 +478,26 @@ export class EngineBridge {
       const initialOverlayStartedMs = nowMs();
       const initialOverlayApplied = renderer.applyOverlayBytes(slideHost.readOverlayBytes());
       this._traceRecorder?.completeAt(
-        'web.main',
+        slideTrace.thread,
         'runtime',
         'initial_overlay_upload',
         initialOverlayStartedMs,
         nowMs() - initialOverlayStartedMs,
         {
+          ...slideTrace.args,
           uploaded: initialOverlayApplied,
         },
       );
       const initialDynamicStartedMs = nowMs();
       const initialDynamicApplied = renderer.applyDynamicMeshBytes(slideHost.readDynamicMeshBytes());
       this._traceRecorder?.completeAt(
-        'web.main',
+        slideTrace.thread,
         'runtime',
         'initial_dynamic_upload',
         initialDynamicStartedMs,
         nowMs() - initialDynamicStartedMs,
         {
+          ...slideTrace.args,
           uploaded: initialDynamicApplied,
         },
       );
@@ -471,17 +509,19 @@ export class EngineBridge {
           channelState: this._channelState,
           networkPolicy: this._hostConfig?.networkPolicy ?? 'any_https',
           endpointMap: this._hostConfig?.sidecarEndpoints ?? {},
+          traceThread: slideTrace.sidecarThread,
           onTrace: (event) => this._relayWorkerTrace(event),
         });
         this._channelState.active = true;
         await sidecarHost.start(pkg.sidecarWasm.slice(), paramsBytes ? paramsBytes.slice() : null);
         this._traceRecorder?.completeAt(
-          'web.main',
+          slideTrace.sidecarThread,
           'bundle',
           'start_sidecar',
           sidecarStartedMs,
           nowMs() - sidecarStartedMs,
           {
+            ...slideTrace.args,
             wasm_bytes: pkg.sidecarWasm.length,
           },
         );
@@ -490,6 +530,9 @@ export class EngineBridge {
       this._renderer = renderer;
       this._slideHost = slideHost;
       this._sidecarHost = sidecarHost;
+      this._slideTraceThread = slideTrace.thread;
+      this._slideTraceArgs = slideTrace.args;
+      this._sidecarTraceThread = slideTrace.sidecarThread;
 
       this._manifestName = pkg.manifest?.name ?? '';
       this._slideName = spec?.name ?? '';
@@ -505,12 +548,13 @@ export class EngineBridge {
         dpr: globalThis.devicePixelRatio ?? 1,
       });
       this._traceRecorder?.completeAt(
-        'web.main',
+        slideTrace.thread,
         'bundle',
         'load_bundle',
         loadStartedMs,
         nowMs() - loadStartedMs,
         {
+          ...slideTrace.args,
           manifest: this._manifestName,
           slide: this._slideName,
           sidecar: Boolean(pkg.sidecarWasm),
@@ -630,17 +674,20 @@ export class EngineBridge {
       ? 1 / 60
       : Math.max(0, Math.min(0.25, (timestampMs - this._lastTimestampMs) / 1000));
     this._lastTimestampMs = timestampMs;
+    const slideTraceThread = this._slideTraceThread || 'web.main';
+    const slideTraceArgs = this._slideTraceArgs ?? {};
 
     const updateStartedMs = nowMs();
     const updateSample = measureCall(() => this._slideHost.update(dt));
     const runtimeStatus = updateSample.result;
     this._traceRecorder?.completeAt(
-      'web.main',
+      slideTraceThread,
       'runtime',
       'vzglyd_update',
       updateStartedMs,
       updateSample.durationMs,
       {
+        ...slideTraceArgs,
         dt_ms: (dt * 1000).toFixed(3),
         status_code: runtimeStatus,
       },
@@ -658,12 +705,13 @@ export class EngineBridge {
       overlayUploadMs = overlaySample.durationMs;
       overlayUploaded = overlaySample.result;
       this._traceRecorder?.completeAt(
-        'web.main',
+        slideTraceThread,
         'runtime',
         'overlay_upload',
         overlayStartedMs,
         overlayUploadMs,
         {
+          ...slideTraceArgs,
           uploaded: overlayUploaded,
           status_code: runtimeStatus,
         },
@@ -676,12 +724,13 @@ export class EngineBridge {
       dynamicUploadMs = dynamicSample.durationMs;
       dynamicUploaded = dynamicSample.result;
       this._traceRecorder?.completeAt(
-        'web.main',
+        slideTraceThread,
         'runtime',
         'dynamic_upload',
         dynamicStartedMs,
         dynamicUploadMs,
         {
+          ...slideTraceArgs,
           uploaded: dynamicUploaded,
           status_code: runtimeStatus,
         },
@@ -691,12 +740,13 @@ export class EngineBridge {
     const renderStartedMs = nowMs();
     const renderSample = measureCall(() => this._renderer.renderFrame(dt));
     this._traceRecorder?.completeAt(
-      'web.main',
+      slideTraceThread,
       'render',
       'render_frame',
       renderStartedMs,
       renderSample.durationMs,
       {
+        ...slideTraceArgs,
         dt_ms: (dt * 1000).toFixed(3),
       },
     );
@@ -709,12 +759,13 @@ export class EngineBridge {
       dynamicUploaded,
     });
     this._traceRecorder?.completeAt(
-      'web.main',
+      slideTraceThread,
       'frame',
       'frame',
       frameStartedMs,
       nowMs() - frameStartedMs,
       {
+        ...slideTraceArgs,
         runtime_status: runtimeStatus,
         overlay_uploaded: overlayUploaded,
         dynamic_uploaded: dynamicUploaded,
@@ -744,6 +795,9 @@ export class EngineBridge {
     this._compiledSceneMeshes = [];
     this._compiledSceneCameraPath = null;
     this._compiledSceneLighting = null;
+    this._slideTraceThread = 'web.main';
+    this._slideTraceArgs = {};
+    this._sidecarTraceThread = 'web.sidecar';
     this._frameStats = createFrameStats();
   }
 

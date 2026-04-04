@@ -234,6 +234,7 @@ async function loadBundleBytes(bytes, label, bundleUrl = null, params = null) {
     await webHost.loadBundle(bytes, {
       logLoadSummary: true,
       params,
+      slidePath: label,
     });
     const stats = webHost.stats() || {};
 
