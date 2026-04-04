@@ -5,6 +5,7 @@ import { createTraceRecorder } from './trace_recorder.js';
 
 test('trace recorder emits begin/end pairs', () => {
   const recorder = createTraceRecorder({ hostKind: 'web', label: 'unit' });
+  recorder.startCapture({ slide: 'air_quality' });
   const spanId = recorder.beginSpan('web.main', 'runtime', 'vzglyd_update', { dt_ms: 16 });
   recorder.endSpan(spanId, { status: '0' });
   const trace = recorder.exportTrace();
@@ -15,7 +16,15 @@ test('trace recorder emits begin/end pairs', () => {
 
 test('trace recorder emits complete events', () => {
   const recorder = createTraceRecorder({ hostKind: 'web', label: 'unit' });
+  recorder.startCapture();
   recorder.complete('web.main', 'renderer', 'render_frame', 4.5, { fps: 60 }, 24.5);
   const trace = recorder.exportTrace();
   assert.ok(trace.traceEvents.some((event) => event.ph === 'X' && event.name === 'render_frame'));
+});
+
+test('trace recorder stays idle until capture starts', () => {
+  const recorder = createTraceRecorder({ hostKind: 'web', label: 'unit' });
+  recorder.instant('web.main', 'renderer', 'render_frame');
+  const trace = recorder.exportTrace();
+  assert.equal(trace.traceEvents.filter((event) => event.name === 'render_frame').length, 0);
 });

@@ -36,36 +36,12 @@ const openPlayerLink = document.getElementById('open-player-link');
 let webHost = null;
 let rafId = null;
 let lastTimestamp = 0;
-let autoTracePosted = false;
 
 const state = {
   repo: null,
   currentSlideIndex: null,
   currentBundleUrl: null,
 };
-
-function parseTraceFlag(value) {
-  return value === '1' || value === 'true' || value === 'yes' || value === 'on';
-}
-
-function traceConfigFromUrl(pageLabel) {
-  const url = new URL(window.location.href);
-  const traceEnabled = parseTraceFlag(url.searchParams.get('trace'))
-    || url.searchParams.has('traceCollector')
-    || url.searchParams.has('traceSession');
-  if (!traceEnabled) {
-    return null;
-  }
-
-  return {
-    enabled: true,
-    label: url.searchParams.get('traceLabel') ?? pageLabel,
-    sessionId: url.searchParams.get('traceSession') ?? undefined,
-    collectorUrl: url.searchParams.get('traceCollector') ?? undefined,
-  };
-}
-
-const traceConfig = traceConfigFromUrl('web-preview');
 
 function setStatus(message, spinning = false) {
   statusBar.hidden = false;
@@ -105,18 +81,6 @@ function updateCrossLinks() {
   if (state.repo?.repoBaseUrl) {
     editorUrl.searchParams.set('repo', state.repo.repoBaseUrl);
     playerUrl.searchParams.set('repo', state.repo.repoBaseUrl);
-  }
-  if (traceConfig?.enabled) {
-    playerUrl.searchParams.set('trace', '1');
-    if (traceConfig.sessionId) {
-      playerUrl.searchParams.set('traceSession', traceConfig.sessionId);
-    }
-    if (traceConfig.collectorUrl) {
-      playerUrl.searchParams.set('traceCollector', traceConfig.collectorUrl);
-    }
-    if (traceConfig.label) {
-      playerUrl.searchParams.set('traceLabel', traceConfig.label);
-    }
   }
   openEditorLink.href = editorUrl.toString();
   openPlayerLink.href = playerUrl.toString();
@@ -247,7 +211,6 @@ async function initHost() {
 
     webHost = new WebHost(canvas, {
       networkPolicy: 'any_https',
-      trace: traceConfig,
     });
 
     clearStatus();
@@ -256,51 +219,6 @@ async function initHost() {
     showError(`Failed to initialize runtime: ${error.message}`);
     return false;
   }
-}
-
-function currentTraceMetadata() {
-  const currentEntry = Number.isInteger(state.currentSlideIndex)
-    ? state.repo?.playlist?.slides?.[state.currentSlideIndex]
-    : null;
-  return {
-    page: 'preview',
-    repo: state.repo?.repoBaseUrl ?? '',
-    slide_index: state.currentSlideIndex ?? '',
-    slide_path: currentEntry?.path ?? '',
-    bundle_url: state.currentBundleUrl ?? '',
-  };
-}
-
-function installTraceTools() {
-  if (!traceConfig?.enabled) {
-    return;
-  }
-
-  window.vzglydTrace = {
-    exportTrace() {
-      return webHost?.exportTrace?.() ?? null;
-    },
-    postTrace(extraMetadata = {}) {
-      if (!webHost?.postTrace) {
-        return Promise.resolve(false);
-      }
-      return webHost.postTrace({
-        ...currentTraceMetadata(),
-        ...extraMetadata,
-      });
-    },
-  };
-
-  const flushTrace = () => {
-    if (autoTracePosted || !webHost?.postTrace) {
-      return;
-    }
-    autoTracePosted = true;
-    void webHost.postTrace(currentTraceMetadata());
-  };
-
-  window.addEventListener('pagehide', flushTrace);
-  window.addEventListener('beforeunload', flushTrace);
 }
 
 async function loadBundleBytes(bytes, label, bundleUrl = null, params = null) {
@@ -532,7 +450,6 @@ function installHandlers() {
 }
 
 async function boot() {
-  installTraceTools();
   setRepoSummary();
   resetCanvasUi();
   updateCrossLinks();

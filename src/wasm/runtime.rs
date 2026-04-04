@@ -26,11 +26,17 @@ extern "C" {
     #[wasm_bindgen(method)]
     fn stats(this: &JsEngineBridge) -> JsValue;
 
+    #[wasm_bindgen(method, js_name = startTraceCapture)]
+    fn start_trace_capture(this: &JsEngineBridge, extra_metadata: JsValue) -> bool;
+
+    #[wasm_bindgen(method, js_name = stopTraceCapture)]
+    fn stop_trace_capture(this: &JsEngineBridge, extra_metadata: JsValue) -> bool;
+
     #[wasm_bindgen(method, js_name = exportTrace)]
     fn export_trace(this: &JsEngineBridge) -> JsValue;
 
-    #[wasm_bindgen(method, catch, js_name = postTrace)]
-    async fn post_trace(this: &JsEngineBridge, extra_metadata: JsValue) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(method, js_name = downloadTrace)]
+    fn download_trace(this: &JsEngineBridge, filename: JsValue) -> bool;
 }
 
 /// Thin Rust wrapper around the browser-side runtime bridge.
@@ -70,13 +76,24 @@ impl RuntimeBridge {
         self.inner.stats()
     }
 
+    pub fn start_trace_capture(&self, extra_metadata: Option<JsValue>) -> bool {
+        let extra_metadata = extra_metadata.unwrap_or_else(|| JsValue::NULL);
+        self.inner.start_trace_capture(extra_metadata)
+    }
+
+    pub fn stop_trace_capture(&self, extra_metadata: Option<JsValue>) -> bool {
+        let extra_metadata = extra_metadata.unwrap_or_else(|| JsValue::NULL);
+        self.inner.stop_trace_capture(extra_metadata)
+    }
+
     pub fn export_trace(&self) -> JsValue {
         self.inner.export_trace()
     }
 
-    pub async fn post_trace(&self, extra_metadata: Option<JsValue>) -> Result<bool, JsValue> {
-        let extra_metadata = extra_metadata.unwrap_or_else(|| JsValue::NULL);
-        let value = self.inner.post_trace(extra_metadata).await?;
-        Ok(value.as_bool().unwrap_or(false))
+    pub fn download_trace(&self, filename: Option<&str>) -> bool {
+        let filename = filename
+            .map(JsValue::from_str)
+            .unwrap_or_else(|| JsValue::UNDEFINED);
+        self.inner.download_trace(filename)
     }
 }

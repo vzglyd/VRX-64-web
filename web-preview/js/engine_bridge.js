@@ -224,7 +224,7 @@ export class EngineBridge {
           hostKind: 'web',
           label: this._hostConfig.trace.label ?? 'web-session',
           sessionId: this._hostConfig.trace.sessionId,
-          collectorUrl: this._hostConfig.trace.collectorUrl ?? null,
+          autoStart: this._hostConfig.trace.autoStart === true,
         })
       : null;
     this._traceRecorder?.bindLongTasks('web.main');
@@ -756,20 +756,35 @@ export class EngineBridge {
       manifestName: this._manifestName,
       sidecarActive: Boolean(this._sidecarHost),
       traceSessionId: this._traceRecorder?.sessionId ?? null,
+      traceCapturing: this._traceRecorder?.capturing ?? false,
       lastError: this._lastError,
       ...this._frameStats,
     };
+  }
+
+  startTraceCapture(extraMetadata = null) {
+    if (!this._traceRecorder) {
+      return false;
+    }
+    return this._traceRecorder.startCapture(extraMetadata ?? {});
+  }
+
+  stopTraceCapture(extraMetadata = null) {
+    if (!this._traceRecorder) {
+      return false;
+    }
+    return this._traceRecorder.stopCapture(extraMetadata ?? {});
   }
 
   exportTrace() {
     return this._traceRecorder?.exportTrace() ?? null;
   }
 
-  async postTrace(extraMetadata = null) {
+  downloadTrace(filename = null) {
     if (!this._traceRecorder) {
       return false;
     }
-    return this._traceRecorder.postToCollector(extraMetadata ?? {});
+    return this._traceRecorder.downloadTrace(filename ?? undefined);
   }
 }
 

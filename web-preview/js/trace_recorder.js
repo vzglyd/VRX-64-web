@@ -1,3 +1,5 @@
+const DEFAULT_MAX_EVENTS = 50000;
+
 function generateSessionId() {
   if (globalThis.crypto?.randomUUID) {
     return globalThis.crypto.randomUUID();
@@ -20,29 +22,19 @@ function toStringMap(input = {}) {
 class TraceRecorder {
   constructor(config = {}) {
     this._enabled = config.enabled !== false;
-    this._startMs = nowMs();
-    this._events = [];
-    this._threads = new Map();
-    this._nextTid = 1;
-    this._nextSpanId = 1;
-    this._activeSpans = new Map();
     this._metadata = {
       host_kind: config.hostKind ?? 'web',
       label: config.label ?? 'web-session',
       session_id: config.sessionId ?? generateSessionId(),
     };
-    this._collectorUrl = config.collectorUrl ?? null;
+    this._maxEvents = Math.max(1024, Number(config.maxEvents) || DEFAULT_MAX_EVENTS);
     this._observer = null;
+    this._capturing = false;
+    this._initializeTrace();
 
-    this._events.push({
-      name: 'process_name',
-      cat: '__metadata',
-      ph: 'M',
-      ts: 0,
-      pid: 1,
-      tid: 0,
-      args: { name: `vzglyd-${this._metadata.host_kind}` },
-    });
+    if (config.autoStart) {
+      this.startCapture();
+    }
   }
 
   get enabled() {
@@ -53,8 +45,53 @@ class TraceRecorder {
     return this._metadata.session_id;
   }
 
+  get capturing() {
+    return this._capturing;
+  }
+
   setMetadata(key, value) {
     this._metadata[key] = String(value);
+  }
+
+  startCapture(extraMetadata = {}) {
+    if (!this._enabled) {
+      return false;
+    }
+    this._initializeTrace();
+    this._applyMetadata(extraMetadata);
+    this._capturing = true;
+    return true;
+  }
+
+  stopCapture(extraMetadata = {}) {
+    if (!this._enabled) {
+      return false;
+    }
+
+    this._applyMetadata(extraMetadata);
+    if (!this._capturing) {
+      return false;
+    }
+
+    const stoppedAtMs = nowMs();
+    for (const [spanId, active] of Array.from(this._activeSpans.entries())) {
+      this._activeSpans.delete(spanId);
+      this._recordEvent({
+        name: active.name,
+        cat: active.category,
+        ph: 'E',
+        ts: this._toUs(stoppedAtMs),
+        pid: 1,
+        tid: active.tid,
+        args: { status: 'stopped' },
+      });
+    }
+
+    if (this._droppedEvents > 0) {
+      this.setMetadata('dropped_events', this._droppedEvents);
+    }
+    this._capturing = false;
+    return true;
   }
 
   bindLongTasks(thread = 'web.main') {
@@ -89,10 +126,10 @@ class TraceRecorder {
   }
 
   beginSpanWithId(spanId, thread, category, name, args = {}, atMs = nowMs()) {
-    if (!this._enabled) return spanId;
+    if (!this._capturing) return spanId;
     const tid = this._resolveThread(thread);
     this._activeSpans.set(spanId, { tid, category, name });
-    this._events.push({
+    this._recordEvent({
       name,
       cat: category,
       ph: 'B',
@@ -105,11 +142,11 @@ class TraceRecorder {
   }
 
   endSpan(spanId, args = {}, atMs = nowMs()) {
-    if (!this._enabled) return;
+    if (!this._capturing) return;
     const active = this._activeSpans.get(spanId);
     if (!active) return;
     this._activeSpans.delete(spanId);
-    this._events.push({
+    this._recordEvent({
       name: active.name,
       cat: active.category,
       ph: 'E',
@@ -121,8 +158,8 @@ class TraceRecorder {
   }
 
   instant(thread, category, name, args = {}, atMs = nowMs()) {
-    if (!this._enabled) return;
-    this._events.push({
+    if (!this._capturing) return;
+    this._recordEvent({
       name,
       cat: category,
       ph: 'i',
@@ -138,8 +175,8 @@ class TraceRecorder {
   }
 
   completeAt(thread, category, name, startMs, durationMs, args = {}) {
-    if (!this._enabled) return;
-    this._events.push({
+    if (!this._capturing) return;
+    this._recordEvent({
       name,
       cat: category,
       ph: 'X',
@@ -160,42 +197,47 @@ class TraceRecorder {
     };
   }
 
-  async postToCollector(extraMetadata = {}) {
-    if (!this._enabled || !this._collectorUrl) {
+  downloadTrace(filename = 'vzglyd-web-trace.perfetto.json') {
+    if (typeof Blob === 'undefined' || typeof document === 'undefined' || typeof URL === 'undefined') {
       return false;
     }
 
-    const payload = {
-      ...this.exportTrace(),
-      metadata: {
-        ...this._metadata,
-        ...toStringMap(extraMetadata),
-      },
-    };
-    const encoded = JSON.stringify(payload);
-
-    if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
-      try {
-        const blob = new Blob([encoded], { type: 'application/json' });
-        if (navigator.sendBeacon(this._collectorUrl, blob)) {
-          return true;
-        }
-      } catch {
-        // Fall back to fetch below.
-      }
-    }
-
-    if (typeof fetch !== 'function') {
-      return false;
-    }
-
-    const response = await fetch(this._collectorUrl, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: encoded,
-      keepalive: true,
+    const blob = new Blob([JSON.stringify(this.exportTrace(), null, 2)], {
+      type: 'application/json',
     });
-    return response.ok;
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = filename;
+    anchor.rel = 'noopener';
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    return true;
+  }
+
+  _applyMetadata(extraMetadata = {}) {
+    for (const [key, value] of Object.entries(toStringMap(extraMetadata))) {
+      this.setMetadata(key, value);
+    }
+  }
+
+  _initializeTrace() {
+    this._startMs = nowMs();
+    this._events = [];
+    this._threads = new Map();
+    this._nextTid = 1;
+    this._nextSpanId = 1;
+    this._activeSpans = new Map();
+    this._droppedEvents = 0;
+    this._recordEvent({
+      name: 'process_name',
+      cat: '__metadata',
+      ph: 'M',
+      ts: 0,
+      pid: 1,
+      tid: 0,
+      args: { name: `vzglyd-${this._metadata.host_kind}` },
+    });
   }
 
   _resolveThread(name) {
@@ -205,7 +247,7 @@ class TraceRecorder {
 
     const tid = this._nextTid++;
     this._threads.set(name, tid);
-    this._events.push({
+    this._recordEvent({
       name: 'thread_name',
       cat: '__metadata',
       ph: 'M',
@@ -215,6 +257,14 @@ class TraceRecorder {
       args: { name },
     });
     return tid;
+  }
+
+  _recordEvent(event) {
+    if (this._events.length >= this._maxEvents) {
+      this._droppedEvents += 1;
+      return;
+    }
+    this._events.push(event);
   }
 
   _toUs(atMs) {

@@ -362,6 +362,7 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
   background: #000;
 }
 
@@ -371,6 +372,60 @@ textarea {
   aspect-ratio: 4 / 3;
   overflow: hidden;
   background: #000;
+}
+
+.view-trace-controls {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(10, 14, 18, 0.84);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
+}
+
+.view-trace-status {
+  color: rgba(229, 236, 242, 0.86);
+  font-size: 0.82rem;
+  font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+}
+
+.view-trace-button,
+.view-trace-link {
+  border-radius: 999px;
+  border: 1px solid rgba(102, 195, 255, 0.24);
+  background: rgba(23, 33, 44, 0.92);
+  color: #f7fbff;
+  padding: 0.38rem 0.78rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.view-trace-button {
+  cursor: pointer;
+}
+
+.view-trace-button:hover,
+.view-trace-link:hover {
+  background: rgba(36, 50, 66, 0.96);
+}
+
+@media (max-width: 720px) {
+  .view-trace-controls {
+    left: 0.75rem;
+    right: 0.75rem;
+    top: 0.75rem;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    border-radius: 18px;
+  }
 }
 
 .view-canvas {

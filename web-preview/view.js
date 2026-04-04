@@ -15,6 +15,8 @@ const overlay = document.getElementById('view-overlay');
 const overlayKicker = document.getElementById('view-overlay-kicker');
 const overlayTitle = document.getElementById('view-overlay-title');
 const overlayText = document.getElementById('view-overlay-text');
+const traceToggle = document.getElementById('view-trace-toggle');
+const traceStatus = document.getElementById('view-trace-status');
 
 let runtimeModulePromise = null;
 let WebHostCtor = null;
@@ -28,7 +30,7 @@ const state = {
   advancing: false,
   sessionToken: 0,
 };
-let autoTracePosted = false;
+let autoTraceStarted = false;
 
 function parseTraceFlag(value) {
   return value === '1' || value === 'true' || value === 'yes' || value === 'on';
@@ -36,18 +38,10 @@ function parseTraceFlag(value) {
 
 function traceConfigFromUrl(pageLabel) {
   const url = new URL(window.location.href);
-  const traceEnabled = parseTraceFlag(url.searchParams.get('trace'))
-    || url.searchParams.has('traceCollector')
-    || url.searchParams.has('traceSession');
-  if (!traceEnabled) {
-    return null;
-  }
-
   return {
     enabled: true,
     label: url.searchParams.get('traceLabel') ?? pageLabel,
-    sessionId: url.searchParams.get('traceSession') ?? undefined,
-    collectorUrl: url.searchParams.get('traceCollector') ?? undefined,
+    autoStart: parseTraceFlag(url.searchParams.get('trace')),
   };
 }
 
@@ -149,43 +143,73 @@ function currentTraceMetadata() {
   };
 }
 
-async function postTraceFromPage() {
-  if (!traceConfig?.enabled || !playerHost.host?.postTrace) {
-    return false;
+function sanitizeTraceName(value) {
+  const sanitized = String(value ?? '')
+    .replace(/\.[^.]+$/, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return sanitized || 'session';
+}
+
+function buildTraceFilename() {
+  const currentEntry = state.schedule[state.currentIndex];
+  const source = currentEntry?.path || playerHost.host?.stats?.()?.slideName || 'session';
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return `vzglyd-web-${sanitizeTraceName(source)}-${timestamp}.perfetto.json`;
+}
+
+function syncTraceUi(message = null) {
+  const capturing = Boolean(playerHost.host?.stats?.()?.traceCapturing);
+  traceToggle.textContent = capturing ? 'Stop & Download' : 'Start Trace';
+  traceStatus.textContent = message ?? (capturing ? 'Capturing trace…' : 'Trace idle');
+}
+
+async function toggleTraceCapture() {
+  try {
+    await playerHost.ensureHost();
+    const capturing = Boolean(playerHost.host?.stats?.()?.traceCapturing);
+    if (!capturing) {
+      const started = playerHost.host?.startTraceCapture?.(currentTraceMetadata()) ?? false;
+      syncTraceUi(started ? 'Capturing trace…' : 'Trace unavailable');
+      return;
+    }
+
+    playerHost.host?.stopTraceCapture?.(currentTraceMetadata());
+    const filename = buildTraceFilename();
+    const downloaded = playerHost.host?.downloadTrace?.(filename) ?? false;
+    syncTraceUi(downloaded ? `Downloaded ${filename}` : 'Trace ready');
+  } catch (error) {
+    console.error('[vzglyd] trace capture failed', error);
+    syncTraceUi('Trace capture failed');
   }
-  return playerHost.host.postTrace(currentTraceMetadata());
 }
 
 function installTraceTools() {
-  if (!traceConfig?.enabled) {
-    return;
-  }
+  syncTraceUi();
+  traceToggle.addEventListener('click', () => {
+    void toggleTraceCapture();
+  });
 
   window.vzglydTrace = {
+    startCapture(extraMetadata = {}) {
+      return playerHost.host?.startTraceCapture?.({
+        ...currentTraceMetadata(),
+        ...extraMetadata,
+      }) ?? false;
+    },
+    stopCapture(extraMetadata = {}) {
+      return playerHost.host?.stopTraceCapture?.({
+        ...currentTraceMetadata(),
+        ...extraMetadata,
+      }) ?? false;
+    },
     exportTrace() {
       return playerHost.host?.exportTrace?.() ?? null;
     },
-    postTrace(extraMetadata = {}) {
-      if (!playerHost.host?.postTrace) {
-        return Promise.resolve(false);
-      }
-      return playerHost.host.postTrace({
-        ...currentTraceMetadata(),
-        ...extraMetadata,
-      });
+    downloadTrace(filename = buildTraceFilename()) {
+      return playerHost.host?.downloadTrace?.(filename) ?? false;
     },
   };
-
-  const flushTrace = () => {
-    if (autoTracePosted) {
-      return;
-    }
-    autoTracePosted = true;
-    void postTraceFromPage();
-  };
-
-  window.addEventListener('pagehide', flushTrace);
-  window.addEventListener('beforeunload', flushTrace);
 }
 
 function setOverlay(kicker, title, text, tone = 'info') {
@@ -217,6 +241,7 @@ function resetPlaybackState() {
   state.slideStartedAtMs = 0;
   state.advancing = false;
   playerHost.teardown();
+  syncTraceUi();
 }
 
 async function ensureRuntime() {
@@ -323,6 +348,16 @@ async function bootPlayer(repoBaseUrl, requestedStartIndex) {
 
   try {
     await ensureRuntime();
+    await playerHost.ensureHost();
+    if (traceConfig.autoStart && !autoTraceStarted) {
+      playerHost.host?.startTraceCapture?.({
+        ...currentTraceMetadata(),
+        trigger: 'auto',
+      });
+      autoTraceStarted = true;
+      syncTraceUi('Capturing trace…');
+    }
+
     const repo = await loadPlaylistFromRepo(repoBaseUrl);
     if (sessionToken !== state.sessionToken) {
       return;
@@ -359,6 +394,7 @@ async function bootPlayer(repoBaseUrl, requestedStartIndex) {
     state.slideStartedAtMs = now;
 
     hideOverlay();
+    syncTraceUi();
     startLoop();
   } catch (error) {
     if (sessionToken !== state.sessionToken) {

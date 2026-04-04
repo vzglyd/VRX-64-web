@@ -9,6 +9,11 @@
 <body class="view-page">
   <div id="app" class="view-app">
     <main class="view-shell" aria-label="Slide player">
+      <div class="view-trace-controls" aria-label="Trace capture controls">
+        <span id="view-trace-status" class="view-trace-status">Trace idle</span>
+        <button id="view-trace-toggle" class="view-trace-button" type="button">Start Trace</button>
+        <a class="view-trace-link" href="https://ui.perfetto.dev/" target="_blank" rel="noopener">Open Perfetto</a>
+      </div>
       <div class="view-stage">
         <canvas id="view-canvas" class="view-canvas" width="640" height="480"></canvas>
       </div>

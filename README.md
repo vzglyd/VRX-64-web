@@ -53,31 +53,31 @@ That serves the local slide root at `http://localhost:8081/` by default.
 import init, { WebHost } from './pkg/vzglyd_web.js';
 
 await init();
-const host = new WebHost(canvas, { networkPolicy: 'any_https' });
+const host = new WebHost(canvas, {
+  networkPolicy: 'any_https',
+  trace: { enabled: true },
+});
 
 await host.loadBundle(bundleBytes, { logLoadSummary: true });
+host.startTraceCapture();
 host.frame(performance.now());
 const stats = host.stats();
-const trace = host.exportTrace();
+host.stopTraceCapture();
+host.downloadTrace('example.perfetto.json');
 host.teardown();
 ```
 
 ## Tracing
 
-Tracing is built into the runtime boundaries. To collect a browser trace:
+Tracing is built into the runtime boundaries. The canonical profiling target is `web-preview/view.html`.
 
-1. Create a session with `VRX-64-tracing/scripts/start_session.py`.
-2. Start the collector, or let `start_session.py --start-collector` do it for you.
-3. Open `view.html` or `index.html` with:
+1. Open `view.html`.
+2. Click `Start Trace`.
+3. Reproduce the issue.
+4. Click `Stop & Download`.
+5. Open the downloaded `*.perfetto.json` file in Perfetto.
 
-```text
-?trace=1&traceSession=<id>&traceCollector=http://127.0.0.1:43101/api/traces
-```
-
-4. Reproduce the issue.
-5. Close/reload the page or call `window.vzglydTrace.postTrace()` from DevTools.
-
-`host.stats()` now includes `traceSessionId`, and `host.exportTrace()` / `host.postTrace()` are available from JS.
+`host.startTraceCapture()`, `host.stopTraceCapture()`, `host.exportTrace()`, and `host.downloadTrace()` are available from JS. Passing `?trace=1` to `view.html` auto-starts capture, but the button path is the normal workflow.
 
 Slide-local preview pages should redirect into `web-preview/view.html` rather than carrying their own browser runtime shell.
 

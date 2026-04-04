@@ -36,11 +36,19 @@ impl WebHostApp {
         self.bridge.stats()
     }
 
+    pub fn start_trace_capture(&self, extra_metadata: Option<JsValue>) -> bool {
+        self.bridge.start_trace_capture(extra_metadata)
+    }
+
+    pub fn stop_trace_capture(&self, extra_metadata: Option<JsValue>) -> bool {
+        self.bridge.stop_trace_capture(extra_metadata)
+    }
+
     pub fn export_trace(&self) -> JsValue {
         self.bridge.export_trace()
     }
 
-    pub async fn post_trace(&self, extra_metadata: Option<JsValue>) -> Result<bool, JsValue> {
-        self.bridge.post_trace(extra_metadata).await
+    pub fn download_trace(&self, filename: Option<&str>) -> bool {
+        self.bridge.download_trace(filename)
     }
 }

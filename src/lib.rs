@@ -73,16 +73,28 @@ impl WebHost {
         self.app.stats()
     }
 
-    /// Export the active trace session as a JS object.
+    /// Start capturing a browser trace in memory.
+    #[wasm_bindgen(js_name = startTraceCapture)]
+    pub fn start_trace_capture(&self, extra_metadata: Option<JsValue>) -> bool {
+        self.app.start_trace_capture(extra_metadata)
+    }
+
+    /// Stop the active browser trace capture.
+    #[wasm_bindgen(js_name = stopTraceCapture)]
+    pub fn stop_trace_capture(&self, extra_metadata: Option<JsValue>) -> bool {
+        self.app.stop_trace_capture(extra_metadata)
+    }
+
+    /// Export the current trace snapshot as a JS object.
     #[wasm_bindgen(js_name = exportTrace)]
     pub fn export_trace(&self) -> JsValue {
         self.app.export_trace()
     }
 
-    /// Post the active trace session to the configured collector endpoint.
-    #[wasm_bindgen(js_name = postTrace)]
-    pub async fn post_trace(&self, extra_metadata: Option<JsValue>) -> Result<bool, JsValue> {
-        self.app.post_trace(extra_metadata).await
+    /// Download the current trace snapshot as a Perfetto JSON artifact.
+    #[wasm_bindgen(js_name = downloadTrace)]
+    pub fn download_trace(&self, filename: Option<String>) -> bool {
+        self.app.download_trace(filename.as_deref())
     }
 }
 
