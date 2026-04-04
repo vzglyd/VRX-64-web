@@ -875,6 +875,8 @@ export class VzglydRenderer {
     this._queue    = gpuState?.queue ?? null;
     this._context  = gpuState?.context ?? null;
     this._format   = gpuState?.format ?? null;
+    this._configuredWidth = 0;
+    this._configuredHeight = 0;
 
     this._uniformBuf  = null;
     this._bindGroup   = null;
@@ -913,7 +915,7 @@ export class VzglydRenderer {
       this._format  = navigator.gpu.getPreferredCanvasFormat();
     }
 
-    this._context.configure({ device: this._device, format: this._format, alphaMode: 'opaque' });
+    this._configureContext();
 
     // Expose device globally so tests/debug tools can read back pixels.
     window.__vzglyd_device = this._device;
@@ -1207,6 +1209,29 @@ export class VzglydRenderer {
     this._depthView = this._depthTexture.createView();
   }
 
+  _configureContext() {
+    this._context.configure({ device: this._device, format: this._format, alphaMode: 'opaque' });
+    this._configuredWidth = this._canvas.width;
+    this._configuredHeight = this._canvas.height;
+  }
+
+  _ensureCanvasConfigured() {
+    const width = this._canvas.width;
+    const height = this._canvas.height;
+
+    if (!width || !height) {
+      return false;
+    }
+
+    if (width === this._configuredWidth && height === this._configuredHeight) {
+      return true;
+    }
+
+    this._configureContext();
+    this._buildDepthTexture();
+    return true;
+  }
+
   // ── Runtime updates ────────────────────────────────────────────────────────
 
   /**
@@ -1375,6 +1400,10 @@ export class VzglydRenderer {
   // ── Render pass ────────────────────────────────────────────────────────────
 
   renderFrame(dt) {
+    if (!this._ensureCanvasConfigured()) {
+      return;
+    }
+
     this._elapsed += dt;
 
     const spec = this._spec;

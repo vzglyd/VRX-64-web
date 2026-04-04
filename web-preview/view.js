@@ -7,10 +7,9 @@ import {
   nextScheduleIndex,
   normalizeStartIndex,
 } from './js/view_player.js';
+import { syncCanvasToContainer } from './js/canvas_sizing.js';
 
 const REPO_STORAGE_KEY = 'vzglyd.shared_repo_url';
-const RENDER_WIDTH = 640;
-const RENDER_HEIGHT = 480;
 
 const overlay = document.getElementById('view-overlay');
 const overlayKicker = document.getElementById('view-overlay-kicker');
@@ -31,13 +30,17 @@ const state = {
 };
 
 class HostSlot {
-  constructor(canvas, size) {
+  constructor(canvas, stage) {
     this.canvas = canvas;
-    sizeCanvas(this.canvas, size);
+    this.stage = stage;
     this.host = null;
     this.entry = null;
     this.bundleUrl = '';
     this.loadToken = 0;
+    this.resizeObserver = null;
+
+    this.syncSize();
+    this.bindResize();
   }
 
   async ensureHost() {
@@ -89,17 +92,26 @@ class HostSlot {
 
     this.host = null;
   }
+
+  syncSize() {
+    syncCanvasToContainer(this.canvas, this.stage);
+  }
+
+  bindResize() {
+    const update = () => this.syncSize();
+    window.addEventListener('resize', update, { passive: true });
+
+    if (typeof ResizeObserver === 'function') {
+      this.resizeObserver = new ResizeObserver(() => update());
+      this.resizeObserver.observe(this.stage);
+    }
+  }
 }
 
-const playerHost = new HostSlot(document.getElementById('view-canvas'), {
-  width: RENDER_WIDTH,
-  height: RENDER_HEIGHT,
-});
-
-function sizeCanvas(canvas, size) {
-  canvas.width = size.width;
-  canvas.height = size.height;
-}
+const playerHost = new HostSlot(
+  document.getElementById('view-canvas'),
+  document.querySelector('.view-stage'),
+);
 
 function setOverlay(kicker, title, text, tone = 'info') {
   overlay.hidden = false;
