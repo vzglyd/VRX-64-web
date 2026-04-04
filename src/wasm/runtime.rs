@@ -25,6 +25,12 @@ extern "C" {
 
     #[wasm_bindgen(method)]
     fn stats(this: &JsEngineBridge) -> JsValue;
+
+    #[wasm_bindgen(method, js_name = exportTrace)]
+    fn export_trace(this: &JsEngineBridge) -> JsValue;
+
+    #[wasm_bindgen(method, catch, js_name = postTrace)]
+    async fn post_trace(this: &JsEngineBridge, extra_metadata: JsValue) -> Result<JsValue, JsValue>;
 }
 
 /// Thin Rust wrapper around the browser-side runtime bridge.
@@ -62,5 +68,15 @@ impl RuntimeBridge {
 
     pub fn stats(&self) -> JsValue {
         self.inner.stats()
+    }
+
+    pub fn export_trace(&self) -> JsValue {
+        self.inner.export_trace()
+    }
+
+    pub async fn post_trace(&self, extra_metadata: Option<JsValue>) -> Result<bool, JsValue> {
+        let extra_metadata = extra_metadata.unwrap_or_else(|| JsValue::NULL);
+        let value = self.inner.post_trace(extra_metadata).await?;
+        Ok(value.as_bool().unwrap_or(false))
     }
 }

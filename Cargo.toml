@@ -32,7 +32,7 @@ web-sys = { version = "0.3", features = [
 
 # Kernel
 vzglyd_kernel = { package = "VRX-64-kernel", path = "../VRX-64-kernel" }
-vzglyd_slide = { package = "VRX-64-slide", git = "https://github.com/vzglyd/VRX-64-slide" }
+vzglyd_slide = { package = "VRX-64-slide", path = "../VRX-64-slide" }
 bytemuck = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc", "use-std"] }
 glam = "0.29"

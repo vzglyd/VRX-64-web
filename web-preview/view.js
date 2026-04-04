@@ -28,6 +28,30 @@ const state = {
   advancing: false,
   sessionToken: 0,
 };
+let autoTracePosted = false;
+
+function parseTraceFlag(value) {
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on';
+}
+
+function traceConfigFromUrl(pageLabel) {
+  const url = new URL(window.location.href);
+  const traceEnabled = parseTraceFlag(url.searchParams.get('trace'))
+    || url.searchParams.has('traceCollector')
+    || url.searchParams.has('traceSession');
+  if (!traceEnabled) {
+    return null;
+  }
+
+  return {
+    enabled: true,
+    label: url.searchParams.get('traceLabel') ?? pageLabel,
+    sessionId: url.searchParams.get('traceSession') ?? undefined,
+    collectorUrl: url.searchParams.get('traceCollector') ?? undefined,
+  };
+}
+
+const traceConfig = traceConfigFromUrl('web-view');
 
 class HostSlot {
   constructor(canvas, stage) {
@@ -48,6 +72,7 @@ class HostSlot {
     if (!this.host) {
       this.host = new WebHostCtor(this.canvas, {
         networkPolicy: 'any_https',
+        trace: traceConfig,
       });
     }
   }
@@ -112,6 +137,56 @@ const playerHost = new HostSlot(
   document.getElementById('view-canvas'),
   document.querySelector('.view-stage'),
 );
+
+function currentTraceMetadata() {
+  const currentEntry = state.schedule[state.currentIndex];
+  return {
+    page: 'view',
+    repo: state.repo?.repoBaseUrl ?? '',
+    slide_index: state.currentIndex,
+    slide_path: currentEntry?.path ?? '',
+    bundle_url: playerHost.bundleUrl,
+  };
+}
+
+async function postTraceFromPage() {
+  if (!traceConfig?.enabled || !playerHost.host?.postTrace) {
+    return false;
+  }
+  return playerHost.host.postTrace(currentTraceMetadata());
+}
+
+function installTraceTools() {
+  if (!traceConfig?.enabled) {
+    return;
+  }
+
+  window.vzglydTrace = {
+    exportTrace() {
+      return playerHost.host?.exportTrace?.() ?? null;
+    },
+    postTrace(extraMetadata = {}) {
+      if (!playerHost.host?.postTrace) {
+        return Promise.resolve(false);
+      }
+      return playerHost.host.postTrace({
+        ...currentTraceMetadata(),
+        ...extraMetadata,
+      });
+    },
+  };
+
+  const flushTrace = () => {
+    if (autoTracePosted) {
+      return;
+    }
+    autoTracePosted = true;
+    void postTraceFromPage();
+  };
+
+  window.addEventListener('pagehide', flushTrace);
+  window.addEventListener('beforeunload', flushTrace);
+}
 
 function setOverlay(kicker, title, text, tone = 'info') {
   overlay.hidden = false;
@@ -294,6 +369,7 @@ async function bootPlayer(repoBaseUrl, requestedStartIndex) {
 }
 
 function boot() {
+  installTraceTools();
   const url = new URL(window.location.href);
   let savedRepo = null;
   try {

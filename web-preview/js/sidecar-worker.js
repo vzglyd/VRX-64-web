@@ -30,6 +30,9 @@ self.onmessage = async (event) => {
       onLog(message) {
         self.postMessage({ type: 'log', message });
       },
+      onTrace(eventPayload) {
+        self.postMessage({ type: 'trace', event: eventPayload });
+      },
     });
 
     const sidecarModule = await WebAssembly.instantiate(data.wasmBytes, host.buildImports());

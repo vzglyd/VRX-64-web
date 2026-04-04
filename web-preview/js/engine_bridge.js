@@ -1,6 +1,7 @@
 import { decodeSlideSpec } from './postcard.js';
 import { createFrameStats, recordFrameStats } from './frame_stats.js';
 import { VzglydRenderer } from './renderer.js';
+import { createTraceRecorder } from './trace_recorder.js';
 import { VzglydWasmHost } from './wasm-host.js';
 import { asUint8Array, unpackBundle } from './bundle_manifest.js';
 import { loadGlbScene, encodeMeshAsset, encodeSceneAnchorSet } from '../pkg/vzglyd_web.js';
@@ -95,6 +96,7 @@ class SidecarWorkerRuntime {
     this._channelState = options.channelState;
     this._networkPolicy = options.networkPolicy ?? 'any_https';
     this._endpointMap = options.endpointMap ?? {};
+    this._onTrace = options.onTrace ?? null;
     this._worker = null;
   }
 
@@ -170,6 +172,10 @@ class SidecarWorkerRuntime {
       console.log('[vzglyd][sidecar]', data.message);
       return;
     }
+    if (data.type === 'trace' && data.event) {
+      this._onTrace?.(data.event);
+      return;
+    }
     if (data.type === 'error') {
       console.error('[vzglyd][sidecar]', data.message);
     }
@@ -212,50 +218,175 @@ export class EngineBridge {
     this._compiledSceneCameraPath = null;
     this._compiledSceneLighting = null;
     this._frameStats = createFrameStats();
+    this._traceRecorder = this._hostConfig?.trace?.enabled
+      ? createTraceRecorder({
+          enabled: true,
+          hostKind: 'web',
+          label: this._hostConfig.trace.label ?? 'web-session',
+          sessionId: this._hostConfig.trace.sessionId,
+          collectorUrl: this._hostConfig.trace.collectorUrl ?? null,
+        })
+      : null;
+    this._traceRecorder?.bindLongTasks('web.main');
+  }
+
+  _relayWorkerTrace(event) {
+    if (!this._traceRecorder || !event) return;
+
+    if (event.kind === 'span_start') {
+      this._traceRecorder.beginSpanWithId(
+        event.spanId,
+        event.thread,
+        event.category,
+        event.name,
+        event.args ?? {},
+        event.atMs,
+      );
+      return;
+    }
+
+    if (event.kind === 'span_end') {
+      this._traceRecorder.endSpan(event.spanId, event.args ?? {}, event.atMs);
+      return;
+    }
+
+    if (event.kind === 'instant') {
+      this._traceRecorder.instant(
+        event.thread,
+        event.category,
+        event.name,
+        event.args ?? {},
+        event.atMs,
+      );
+      return;
+    }
+
+    if (event.kind === 'complete') {
+      this._traceRecorder.completeAt(
+        event.thread,
+        event.category,
+        event.name,
+        event.startMs,
+        event.durationMs,
+        event.args ?? {},
+      );
+    }
   }
 
   async loadBundle(bundleBytes, runtimeOptions = null) {
     this.teardown();
+    const loadStartedMs = nowMs();
 
     try {
       const bytes = asUint8Array(bundleBytes);
       const pkg = unpackBundle(bytes);
+      const traceMetadata = {
+        bundle_bytes: bytes.length,
+        manifest_name: pkg.manifest?.name ?? '',
+        manifest_version: pkg.manifest?.version ?? '',
+        has_sidecar: Boolean(pkg.sidecarWasm),
+      };
+      if (this._traceRecorder) {
+        for (const [key, value] of Object.entries(traceMetadata)) {
+          if (value !== '' && value != null) {
+            this._traceRecorder.setMetadata(key, value);
+          }
+        }
+      }
 
       const meshAssets = new Map(pkg.miscAssets);
       const sceneMetadata = new Map(pkg.miscAssets);
 
       // Handle authored scene compilation if needed
       if (requiresAuthoredSceneCompilation(pkg.manifest)) {
+        const compileStartedMs = nowMs();
         await this.compileAuthoredScenes(pkg.manifest, pkg.miscAssets, meshAssets, sceneMetadata);
+        this._traceRecorder?.completeAt(
+          'web.main',
+          'bundle',
+          'compile_authored_scenes',
+          compileStartedMs,
+          nowMs() - compileStartedMs,
+          {
+            scene_count: pkg.manifest.assets.scenes.length,
+            compiled_meshes: this._compiledSceneMeshes.length,
+          },
+        );
       }
 
       const slideHost = new VzglydWasmHost({
         channelState: this._channelState,
         meshAssets,
         sceneMetadata,
+        traceRecorder: this._traceRecorder,
+        traceThread: `slide:${pkg.manifest?.name ?? 'guest'}`,
+        traceCategory: 'guest.slide',
       });
       const paramsBytes = encodeRuntimeParams(runtimeOptions?.params);
       
       // Pass compiled meshes to slideHost for potential use
       slideHost._compiledSceneMeshes = this._compiledSceneMeshes || [];
 
+      const instantiateStartedMs = nowMs();
       const slideModule = await WebAssembly.instantiate(pkg.slideWasm, slideHost.buildImports());
+      this._traceRecorder?.completeAt(
+        'web.main',
+        'bundle',
+        'instantiate_slide',
+        instantiateStartedMs,
+        nowMs() - instantiateStartedMs,
+        {
+          wasm_bytes: pkg.slideWasm.length,
+        },
+      );
+
+      const runtimeInitStartedMs = nowMs();
       slideHost.setInstance(slideModule.instance);
       slideHost.runStart();
       slideHost.configureParams(paramsBytes);
+      this._traceRecorder?.completeAt(
+        'web.main',
+        'bundle',
+        'configure_slide',
+        runtimeInitStartedMs,
+        nowMs() - runtimeInitStartedMs,
+        {
+          has_params: Boolean(paramsBytes),
+        },
+      );
 
       // Note: We no longer patch the spec in WASM memory (postcard is variable-length).
       // Instead, we'll modify the decoded spec object below.
       console.log('[vzglyd] Compiled meshes ready:', slideHost._compiledSceneMeshes.length);
 
+      const initStartedMs = nowMs();
       slideHost.runInit();
+      this._traceRecorder?.completeAt(
+        'web.main',
+        'bundle',
+        'vzglyd_init',
+        initStartedMs,
+        nowMs() - initStartedMs,
+      );
 
+      const specReadStartedMs = nowMs();
       const specWire = slideHost.readSpecBytes();
       if (specWire[0] !== WIRE_VERSION) {
         throw new Error(`unsupported slide wire version ${specWire[0]} (expected ${WIRE_VERSION})`);
       }
 
       let spec = decodeSlideSpec(specWire.slice(1));
+      this._traceRecorder?.completeAt(
+        'web.main',
+        'bundle',
+        'decode_spec',
+        specReadStartedMs,
+        nowMs() - specReadStartedMs,
+        {
+          spec_bytes: specWire.length,
+          scene_space: spec.scene_space,
+        },
+      );
       
       if (this._compiledSceneMeshes && this._compiledSceneMeshes.length > 0) {
         if (spec.scene_space === 'Screen2D') {
@@ -290,23 +421,70 @@ export class EngineBridge {
         spec.lighting = toWorldLightingSpec(this._compiledSceneLighting, spec.lighting);
       }
       
+      const rendererInitStartedMs = nowMs();
       const renderer = new VzglydRenderer(this._canvas, spec, this._gpuState);
       await renderer.init();
       this._gpuState = renderer.gpuState();
       this._frameStats = createFrameStats();
+      this._traceRecorder?.completeAt(
+        'web.main',
+        'bundle',
+        'renderer_init',
+        rendererInitStartedMs,
+        nowMs() - rendererInitStartedMs,
+        {
+          canvas_width: this._canvas.width,
+          canvas_height: this._canvas.height,
+          dpr: globalThis.devicePixelRatio ?? 1,
+        },
+      );
 
-      renderer.applyOverlayBytes(slideHost.readOverlayBytes());
-      renderer.applyDynamicMeshBytes(slideHost.readDynamicMeshBytes());
+      const initialOverlayStartedMs = nowMs();
+      const initialOverlayApplied = renderer.applyOverlayBytes(slideHost.readOverlayBytes());
+      this._traceRecorder?.completeAt(
+        'web.main',
+        'runtime',
+        'initial_overlay_upload',
+        initialOverlayStartedMs,
+        nowMs() - initialOverlayStartedMs,
+        {
+          uploaded: initialOverlayApplied,
+        },
+      );
+      const initialDynamicStartedMs = nowMs();
+      const initialDynamicApplied = renderer.applyDynamicMeshBytes(slideHost.readDynamicMeshBytes());
+      this._traceRecorder?.completeAt(
+        'web.main',
+        'runtime',
+        'initial_dynamic_upload',
+        initialDynamicStartedMs,
+        nowMs() - initialDynamicStartedMs,
+        {
+          uploaded: initialDynamicApplied,
+        },
+      );
 
       let sidecarHost = null;
       if (pkg.sidecarWasm) {
+        const sidecarStartedMs = nowMs();
         sidecarHost = new SidecarWorkerRuntime({
           channelState: this._channelState,
           networkPolicy: this._hostConfig?.networkPolicy ?? 'any_https',
           endpointMap: this._hostConfig?.sidecarEndpoints ?? {},
+          onTrace: (event) => this._relayWorkerTrace(event),
         });
         this._channelState.active = true;
         await sidecarHost.start(pkg.sidecarWasm.slice(), paramsBytes ? paramsBytes.slice() : null);
+        this._traceRecorder?.completeAt(
+          'web.main',
+          'bundle',
+          'start_sidecar',
+          sidecarStartedMs,
+          nowMs() - sidecarStartedMs,
+          {
+            wasm_bytes: pkg.sidecarWasm.length,
+          },
+        );
       }
 
       this._renderer = renderer;
@@ -318,6 +496,26 @@ export class EngineBridge {
       this._lastTimestampMs = null;
       this._lastError = null;
       this._loaded = true;
+      this._traceRecorder?.setMetadata('slide_name', this._slideName);
+      this._traceRecorder?.instant('web.main', 'display', 'canvas_state', {
+        css_width: Math.round(this._canvas.getBoundingClientRect().width),
+        css_height: Math.round(this._canvas.getBoundingClientRect().height),
+        backing_width: this._canvas.width,
+        backing_height: this._canvas.height,
+        dpr: globalThis.devicePixelRatio ?? 1,
+      });
+      this._traceRecorder?.completeAt(
+        'web.main',
+        'bundle',
+        'load_bundle',
+        loadStartedMs,
+        nowMs() - loadStartedMs,
+        {
+          manifest: this._manifestName,
+          slide: this._slideName,
+          sidecar: Boolean(pkg.sidecarWasm),
+        },
+      );
 
       if (runtimeOptions?.logLoadSummary) {
         console.info('[vzglyd] loaded bundle', {
@@ -328,6 +526,16 @@ export class EngineBridge {
       }
     } catch (error) {
       this._lastError = error instanceof Error ? error.message : String(error);
+      this._traceRecorder?.completeAt(
+        'web.main',
+        'bundle',
+        'load_bundle',
+        loadStartedMs,
+        nowMs() - loadStartedMs,
+        {
+          error: this._lastError,
+        },
+      );
       this.teardown();
       throw error;
     }
@@ -416,34 +624,82 @@ export class EngineBridge {
 
   frame(timestampMs) {
     if (!this._loaded || !this._slideHost || !this._renderer) return;
+    const frameStartedMs = nowMs();
 
     const dt = this._lastTimestampMs == null
       ? 1 / 60
       : Math.max(0, Math.min(0.25, (timestampMs - this._lastTimestampMs) / 1000));
     this._lastTimestampMs = timestampMs;
 
+    const updateStartedMs = nowMs();
     const updateSample = measureCall(() => this._slideHost.update(dt));
     const runtimeStatus = updateSample.result;
+    this._traceRecorder?.completeAt(
+      'web.main',
+      'runtime',
+      'vzglyd_update',
+      updateStartedMs,
+      updateSample.durationMs,
+      {
+        dt_ms: (dt * 1000).toFixed(3),
+        status_code: runtimeStatus,
+      },
+    );
     let overlayUploadMs = 0;
     let dynamicUploadMs = 0;
     let overlayUploaded = false;
     let dynamicUploaded = false;
 
     if (runtimeStatus !== 0) {
+      const overlayStartedMs = nowMs();
       const overlaySample = measureCall(() =>
         this._renderer.applyOverlayBytes(this._slideHost.readOverlayBytes()),
       );
       overlayUploadMs = overlaySample.durationMs;
       overlayUploaded = overlaySample.result;
+      this._traceRecorder?.completeAt(
+        'web.main',
+        'runtime',
+        'overlay_upload',
+        overlayStartedMs,
+        overlayUploadMs,
+        {
+          uploaded: overlayUploaded,
+          status_code: runtimeStatus,
+        },
+      );
 
+      const dynamicStartedMs = nowMs();
       const dynamicSample = measureCall(() =>
         this._renderer.applyDynamicMeshBytes(this._slideHost.readDynamicMeshBytes()),
       );
       dynamicUploadMs = dynamicSample.durationMs;
       dynamicUploaded = dynamicSample.result;
+      this._traceRecorder?.completeAt(
+        'web.main',
+        'runtime',
+        'dynamic_upload',
+        dynamicStartedMs,
+        dynamicUploadMs,
+        {
+          uploaded: dynamicUploaded,
+          status_code: runtimeStatus,
+        },
+      );
     }
 
+    const renderStartedMs = nowMs();
     const renderSample = measureCall(() => this._renderer.renderFrame(dt));
+    this._traceRecorder?.completeAt(
+      'web.main',
+      'render',
+      'render_frame',
+      renderStartedMs,
+      renderSample.durationMs,
+      {
+        dt_ms: (dt * 1000).toFixed(3),
+      },
+    );
     recordFrameStats(this._frameStats, {
       updateMs: updateSample.durationMs,
       overlayUploadMs,
@@ -452,6 +708,19 @@ export class EngineBridge {
       overlayUploaded,
       dynamicUploaded,
     });
+    this._traceRecorder?.completeAt(
+      'web.main',
+      'frame',
+      'frame',
+      frameStartedMs,
+      nowMs() - frameStartedMs,
+      {
+        runtime_status: runtimeStatus,
+        overlay_uploaded: overlayUploaded,
+        dynamic_uploaded: dynamicUploaded,
+        slide: this._slideName,
+      },
+    );
   }
 
   teardown() {
@@ -486,9 +755,21 @@ export class EngineBridge {
       slideName: this._slideName,
       manifestName: this._manifestName,
       sidecarActive: Boolean(this._sidecarHost),
+      traceSessionId: this._traceRecorder?.sessionId ?? null,
       lastError: this._lastError,
       ...this._frameStats,
     };
+  }
+
+  exportTrace() {
+    return this._traceRecorder?.exportTrace() ?? null;
+  }
+
+  async postTrace(extraMetadata = null) {
+    if (!this._traceRecorder) {
+      return false;
+    }
+    return this._traceRecorder.postToCollector(extraMetadata ?? {});
   }
 }
 

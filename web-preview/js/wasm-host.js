@@ -27,6 +27,10 @@ const HOST_BUFFER_TOO_SMALL = -2;
 const HOST_CHANNEL_EMPTY = -3;
 const HOST_ASSET_NOT_FOUND = -4;
 
+function traceNowMs() {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+
 function emptyChannelState() {
   return {
     latest: null,
@@ -42,6 +46,11 @@ class BaseWasmHost {
     this._startMs = performance.now();
     this._channelState = options.channelState ?? emptyChannelState();
     this._blockingSleep = options.blockingSleep ?? null;
+    this._traceRecorder = options.traceRecorder ?? null;
+    this._traceThread = options.traceThread ?? 'guest';
+    this._traceCategory = options.traceCategory ?? 'guest';
+    this._onTrace = options.onTrace ?? null;
+    this._nextTraceSpanId = 1;
   }
 
   setInstance(instance) {
@@ -68,6 +77,111 @@ class BaseWasmHost {
   _writeBytes(ptr, data) {
     this._memU8().set(data, ptr);
     return data.length;
+  }
+
+  _parseTracePayload(ptr, len) {
+    return JSON.parse(this._readString(ptr >>> 0, len >>> 0));
+  }
+
+  _traceSpanStart(ptr, len) {
+    try {
+      const payload = this._parseTracePayload(ptr, len);
+      const args = payload.attrs ?? {};
+      if (this._traceRecorder) {
+        return this._traceRecorder.beginSpan(
+          this._traceThread,
+          this._traceCategory,
+          payload.name,
+          args,
+        );
+      }
+      if (this._onTrace) {
+        const spanId = this._nextTraceSpanId++;
+        this._onTrace({
+          kind: 'span_start',
+          spanId,
+          thread: this._traceThread,
+          category: this._traceCategory,
+          name: payload.name,
+          args,
+          atMs: traceNowMs(),
+        });
+        return spanId;
+      }
+      return 0;
+    } catch {
+      return HOST_ERROR;
+    }
+  }
+
+  _traceSpanEnd(spanId, ptr, len) {
+    try {
+      const payload = len > 0 ? this._parseTracePayload(ptr, len) : {};
+      const args = payload.attrs ?? {};
+      if (payload.status != null) {
+        args.status = payload.status;
+      }
+      if (this._traceRecorder) {
+        this._traceRecorder.endSpan(spanId, args);
+      }
+      if (this._onTrace) {
+        this._onTrace({
+          kind: 'span_end',
+          spanId,
+          args,
+          atMs: traceNowMs(),
+        });
+      }
+      return WASI_ESUCCESS;
+    } catch {
+      return HOST_ERROR;
+    }
+  }
+
+  _traceEvent(ptr, len) {
+    try {
+      const payload = this._parseTracePayload(ptr, len);
+      const args = payload.attrs ?? {};
+      if (this._traceRecorder) {
+        this._traceRecorder.instant(
+          this._traceThread,
+          this._traceCategory,
+          payload.name,
+          args,
+        );
+      }
+      if (this._onTrace) {
+        this._onTrace({
+          kind: 'instant',
+          thread: this._traceThread,
+          category: this._traceCategory,
+          name: payload.name,
+          args,
+          atMs: traceNowMs(),
+        });
+      }
+      return WASI_ESUCCESS;
+    } catch {
+      return HOST_ERROR;
+    }
+  }
+
+  _traceComplete(category, name, startMs, args = {}) {
+    const durationMs = traceNowMs() - startMs;
+    if (this._traceRecorder) {
+      this._traceRecorder.complete(this._traceThread, category, name, durationMs, args);
+    }
+    if (this._onTrace) {
+      this._onTrace({
+        kind: 'complete',
+        thread: this._traceThread,
+        category,
+        name,
+        args,
+        startMs,
+        durationMs,
+      });
+    }
   }
 
   configureParams(paramBytes) {
@@ -550,6 +664,11 @@ export class VzglydWasmHost extends BaseWasmHost {
         if (state.latest.length > (bufLen >>> 0)) return HOST_BUFFER_TOO_SMALL;
         self._writeBytes(bufPtr >>> 0, state.latest);
         state.dirty = false;
+        if (self._traceRecorder) {
+          self._traceRecorder.instant(self._traceThread, 'channel', 'channel_poll', {
+            bytes: state.latest.length,
+          });
+        }
         return state.latest.length | 0;
       },
 
@@ -561,10 +680,27 @@ export class VzglydWasmHost extends BaseWasmHost {
         try {
           const msg = self._readString(ptr >>> 0, len >>> 0);
           console.log('[vzglyd]', msg);
+          if (self._traceRecorder) {
+            self._traceRecorder.instant(self._traceThread, 'guest.log', 'slide_log', {
+              message: msg,
+            });
+          }
           return WASI_ESUCCESS;
         } catch {
           return HOST_ERROR;
         }
+      },
+
+      trace_span_start(ptr, len) {
+        return self._traceSpanStart(ptr, len);
+      },
+
+      trace_span_end(spanId, ptr, len) {
+        return self._traceSpanEnd(spanId, ptr, len);
+      },
+
+      trace_event(ptr, len) {
+        return self._traceEvent(ptr, len);
       },
 
       mesh_asset_len(keyPtr, keyLen) {
@@ -779,6 +915,21 @@ export class VzglydSidecarHost extends BaseWasmHost {
         try {
           const bytes = self._readBytes(ptr >>> 0, len >>> 0);
           self._emitChannelPush(bytes);
+          if (self._traceRecorder) {
+            self._traceRecorder.instant(self._traceThread, 'channel', 'channel_push', {
+              bytes: bytes.length,
+            });
+          }
+          if (self._onTrace) {
+            self._onTrace({
+              kind: 'instant',
+              thread: self._traceThread,
+              category: 'channel',
+              name: 'channel_push',
+              args: { bytes: String(bytes.length) },
+              atMs: traceNowMs(),
+            });
+          }
           return WASI_ESUCCESS;
         } catch {
           return HOST_ERROR;
@@ -793,10 +944,27 @@ export class VzglydSidecarHost extends BaseWasmHost {
         try {
           const msg = self._readString(ptr >>> 0, len >>> 0);
           self._logSidecar(msg);
+          if (self._traceRecorder) {
+            self._traceRecorder.instant(self._traceThread, 'guest.log', 'sidecar_log', {
+              message: msg,
+            });
+          }
           return WASI_ESUCCESS;
         } catch {
           return HOST_ERROR;
         }
+      },
+
+      trace_span_start(ptr, len) {
+        return self._traceSpanStart(ptr, len);
+      },
+
+      trace_span_end(spanId, ptr, len) {
+        return self._traceSpanEnd(spanId, ptr, len);
+      },
+
+      trace_event(ptr, len) {
+        return self._traceEvent(ptr, len);
       },
 
       channel_active() {
@@ -806,8 +974,13 @@ export class VzglydSidecarHost extends BaseWasmHost {
       network_request(ptr, len) {
         if (ptr < 0 || len < 0) return HOST_ERROR;
         try {
+          const startedAtMs = traceNowMs();
           const requestBytes = self._readBytes(ptr >>> 0, len >>> 0);
           self._lastNetworkResponse = self._executeNetworkRequest(requestBytes);
+          self._traceComplete('host', 'network_request', startedAtMs, {
+            request_bytes: requestBytes.length,
+            response_bytes: self._lastNetworkResponse?.length ?? 0,
+          });
           return WASI_ESUCCESS;
         } catch {
           self._lastNetworkResponse = null;

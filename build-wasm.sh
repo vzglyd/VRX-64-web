@@ -3,6 +3,9 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 echo "Building WASM with wasm-pack..."
 wasm-pack build --mode no-install --target web --out-dir web-preview/pkg
 

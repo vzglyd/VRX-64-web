@@ -72,6 +72,18 @@ impl WebHost {
     pub fn stats(&self) -> JsValue {
         self.app.stats()
     }
+
+    /// Export the active trace session as a JS object.
+    #[wasm_bindgen(js_name = exportTrace)]
+    pub fn export_trace(&self) -> JsValue {
+        self.app.export_trace()
+    }
+
+    /// Post the active trace session to the configured collector endpoint.
+    #[wasm_bindgen(js_name = postTrace)]
+    pub async fn post_trace(&self, extra_metadata: Option<JsValue>) -> Result<bool, JsValue> {
+        self.app.post_trace(extra_metadata).await
+    }
 }
 
 /// wasm entry hook.

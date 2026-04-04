@@ -35,4 +35,12 @@ impl WebHostApp {
     pub fn stats(&self) -> JsValue {
         self.bridge.stats()
     }
+
+    pub fn export_trace(&self) -> JsValue {
+        self.bridge.export_trace()
+    }
+
+    pub async fn post_trace(&self, extra_metadata: Option<JsValue>) -> Result<bool, JsValue> {
+        self.bridge.post_trace(extra_metadata).await
+    }
 }
