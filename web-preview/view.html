@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>vzglyd player</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="view-page">
+  <div id="app" class="view-app">
+    <main class="view-shell" aria-label="Slide player">
+      <div class="view-stage">
+        <canvas id="view-canvas" class="view-canvas" width="640" height="480"></canvas>
+      </div>
+    </main>
+
+    <div id="view-overlay" class="view-overlay" hidden>
+      <div class="view-overlay-card">
+        <p id="view-overlay-kicker" class="eyebrow">Browser player</p>
+        <h1 id="view-overlay-title">Loading player</h1>
+        <p id="view-overlay-text" class="subtitle"></p>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
+  <script type="module" src="view.js"></script>
+</body>
+</html>

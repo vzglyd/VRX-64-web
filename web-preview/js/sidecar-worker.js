@@ -34,6 +34,7 @@ self.onmessage = async (event) => {
 
     const sidecarModule = await WebAssembly.instantiate(data.wasmBytes, host.buildImports());
     host.setInstance(sidecarModule.instance);
+    host.configureParams(data.paramsBytes ?? null);
     self.postMessage({ type: 'ready' });
     host.run();
   } catch (error) {

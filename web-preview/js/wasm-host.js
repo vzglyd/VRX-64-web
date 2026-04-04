@@ -70,6 +70,32 @@ class BaseWasmHost {
     return data.length;
   }
 
+  configureParams(paramBytes) {
+    if (!paramBytes || paramBytes.length === 0) {
+      return false;
+    }
+
+    const ptrFn = this._instance?.exports?.vzglyd_params_ptr;
+    const capFn = this._instance?.exports?.vzglyd_params_capacity;
+    const cfgFn = this._instance?.exports?.vzglyd_configure;
+    if (!ptrFn || !capFn || !cfgFn) {
+      return false;
+    }
+    if (!this._memory) {
+      throw new Error('module is missing memory export required for params');
+    }
+
+    const capacity = capFn() >>> 0;
+    const ptr = ptrFn() >>> 0;
+    const writeLen = Math.min(paramBytes.length, capacity);
+    this._writeBytes(ptr, paramBytes.subarray(0, writeLen));
+    const status = cfgFn(writeLen);
+    if ((status | 0) < 0) {
+      throw new Error(`vzglyd_configure(${writeLen}) failed with status ${status}`);
+    }
+    return true;
+  }
+
   _clockTimeNs(clockId) {
     if (clockId === CLOCK_MONOTONIC) {
       return BigInt(Math.round((performance.now() - this._startMs) * 1_000_000));
@@ -105,8 +131,17 @@ class BaseWasmHost {
         return WASI_ESUCCESS;
       },
 
-      clock_time_get(clockId, _precisionLo, _precisionHi, outPtr) {
-        self._memView().setBigUint64(outPtr, self._clockTimeNs(clockId), true);
+      clock_time_get(...args) {
+        let clockId;
+        let outPtr;
+        if (args.length === 3 && typeof args[1] === 'bigint') {
+          [clockId, , outPtr] = args;
+        } else if (args.length === 4) {
+          [clockId, , , outPtr] = args;
+        } else {
+          return WASI_EINVAL;
+        }
+        self._memView().setBigUint64(outPtr >>> 0, self._clockTimeNs(clockId), true);
         return WASI_ESUCCESS;
       },
 

@@ -148,7 +148,7 @@
                 setStatus('Fetching loading.vzglyd...');
                 log('Fetching loading.vzglyd...', 'info');
                 
-                const response = await fetch('../lume/target/debug/build/vzglyd-7fa5e9cf2f44ca9d/out/loading.vzglyd');
+                const response = await fetch('../lume/target/debug/build/VRX-64-7fa5e9cf2f44ca9d/out/loading.vzglyd');
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }

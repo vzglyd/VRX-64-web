@@ -1,11 +1,32 @@
-const PREVIEW_BUILD_ID = '2026-04-03-shaderfix-3';
-
 import { decodeSlideSpec } from './postcard.js';
-import { VzglydRenderer } from './renderer.js?v=2026-04-03-shaderfix-3';
+import { createFrameStats, recordFrameStats } from './frame_stats.js';
+import { VzglydRenderer } from './renderer.js';
 import { VzglydWasmHost } from './wasm-host.js';
-import { loadGlbScene, encodeMeshAsset, encodeSceneAnchorSet } from '../pkg/vzglyd_web.js?v=2026-04-03-shaderfix-3';
+import { asUint8Array, unpackBundle } from './bundle_manifest.js';
+import { loadGlbScene, encodeMeshAsset, encodeSceneAnchorSet } from '../pkg/vzglyd_web.js';
 
 const WIRE_VERSION = 1;
+const TEXT_ENCODER = new TextEncoder();
+
+function encodeRuntimeParams(params) {
+  if (params == null) {
+    return null;
+  }
+  return TEXT_ENCODER.encode(JSON.stringify(params));
+}
+
+function nowMs() {
+  return performance.now();
+}
+
+function measureCall(fn) {
+  const startMs = nowMs();
+  const result = fn();
+  return {
+    result,
+    durationMs: nowMs() - startMs,
+  };
+}
 
 function toWorldLightingSpec(compiledLighting, fallbackLighting = null) {
   if (!compiledLighting?.directional_light && !fallbackLighting) return null;
@@ -65,93 +86,6 @@ function attachHybridWorldBackground(spec, compiledMeshes, compiledCameraPath, c
   };
 }
 
-function asUint8Array(bytesLike) {
-  if (bytesLike instanceof Uint8Array) return bytesLike;
-  if (ArrayBuffer.isView(bytesLike)) {
-    return new Uint8Array(bytesLike.buffer, bytesLike.byteOffset, bytesLike.byteLength);
-  }
-  if (bytesLike instanceof ArrayBuffer) {
-    return new Uint8Array(bytesLike);
-  }
-  throw new Error('expected Uint8Array-compatible bundle bytes');
-}
-
-function archiveEntries(bundleBytes) {
-  const fflateApi = globalThis.fflate;
-  if (!fflateApi || typeof fflateApi.unzipSync !== 'function') {
-    throw new Error('fflate unzipSync API unavailable; include fflate before loading app.js');
-  }
-
-  return Object.entries(fflateApi.unzipSync(bundleBytes)).map(([path, bytes]) => ({
-    path,
-    base: path.split('/').filter(Boolean).pop() ?? path,
-    bytes,
-  }));
-}
-
-function pickEntry(entries, preferredBaseNames) {
-  for (const baseName of preferredBaseNames) {
-    const exact = entries.find((entry) => entry.base === baseName);
-    if (exact) return exact;
-  }
-  return null;
-}
-
-function parseManifest(manifestBytes) {
-  const manifestJson = new TextDecoder().decode(manifestBytes);
-  return JSON.parse(manifestJson);
-}
-
-function unpackBundle(bundleBytes) {
-  const entries = archiveEntries(bundleBytes);
-  if (entries.length === 0) {
-    throw new Error('archive is empty');
-  }
-
-  const manifestEntry =
-    pickEntry(entries, ['manifest.json']) ??
-    entries.find((entry) => entry.base.endsWith('_slide.json'));
-  const slideWasmEntry =
-    pickEntry(entries, ['slide.wasm']) ??
-    entries.find((entry) => entry.base.endsWith('_slide.wasm'));
-  const sidecarEntry = pickEntry(entries, ['sidecar.wasm']);
-
-  if (!manifestEntry) {
-    throw new Error('bundle is missing manifest.json');
-  }
-  if (!slideWasmEntry) {
-    throw new Error('bundle is missing slide.wasm');
-  }
-
-  const manifest = parseManifest(manifestEntry.bytes);
-
-  const miscAssets = new Map();
-  for (const entry of entries) {
-    if (entry.path === manifestEntry.path || entry.path === slideWasmEntry.path) continue;
-    miscAssets.set(entry.path, entry.bytes);
-    miscAssets.set(entry.base, entry.bytes);
-  }
-
-  return {
-    manifest,
-    slideWasm: slideWasmEntry.bytes,
-    sidecarWasm: sidecarEntry?.bytes ?? null,
-    miscAssets,
-  };
-}
-
-function validateManifest(manifest) {
-  if (manifest.scene_space && !['screen_2d', 'world_3d'].includes(manifest.scene_space)) {
-    throw new Error(`manifest.scene_space '${manifest.scene_space}' is unsupported`);
-  }
-  if (manifest.display?.duration_seconds != null) {
-    const seconds = Number(manifest.display.duration_seconds);
-    if (!Number.isFinite(seconds) || seconds < 1 || seconds > 300) {
-      throw new Error('manifest.display.duration_seconds must be in [1, 300]');
-    }
-  }
-}
-
 function requiresAuthoredSceneCompilation(manifest) {
   return Array.isArray(manifest?.assets?.scenes) && manifest.assets.scenes.length > 0;
 }
@@ -164,12 +98,12 @@ class SidecarWorkerRuntime {
     this._worker = null;
   }
 
-  async start(wasmBytes) {
+  async start(wasmBytes, paramsBytes = null) {
     if (typeof Worker !== 'function') {
       throw new Error('browser sidecars require Worker support');
     }
 
-    const worker = new Worker(new URL(`./sidecar-worker.js?v=${PREVIEW_BUILD_ID}`, import.meta.url), {
+    const worker = new Worker(new URL('./sidecar-worker.js', import.meta.url), {
       type: 'module',
     });
     this._worker = worker;
@@ -208,15 +142,19 @@ class SidecarWorkerRuntime {
       this._handleMessage(event.data);
     });
 
-    worker.postMessage(
-      {
-        type: 'init',
-        wasmBytes,
-        networkPolicy: this._networkPolicy,
-        endpointMap: this._endpointMap,
-      },
-      [wasmBytes.buffer],
-    );
+    const message = {
+      type: 'init',
+      wasmBytes,
+      paramsBytes,
+      networkPolicy: this._networkPolicy,
+      endpointMap: this._endpointMap,
+    };
+    const transfer = [wasmBytes.buffer];
+    if (paramsBytes) {
+      transfer.push(paramsBytes.buffer);
+    }
+
+    worker.postMessage(message, transfer);
 
     await ready;
   }
@@ -269,9 +207,11 @@ export class EngineBridge {
     this._slideName = '';
     this._manifestName = '';
     this._lastError = null;
+    this._gpuState = null;
     this._compiledSceneMeshes = [];
     this._compiledSceneCameraPath = null;
     this._compiledSceneLighting = null;
+    this._frameStats = createFrameStats();
   }
 
   async loadBundle(bundleBytes, runtimeOptions = null) {
@@ -280,7 +220,6 @@ export class EngineBridge {
     try {
       const bytes = asUint8Array(bundleBytes);
       const pkg = unpackBundle(bytes);
-      validateManifest(pkg.manifest);
 
       const meshAssets = new Map(pkg.miscAssets);
       const sceneMetadata = new Map(pkg.miscAssets);
@@ -295,6 +234,7 @@ export class EngineBridge {
         meshAssets,
         sceneMetadata,
       });
+      const paramsBytes = encodeRuntimeParams(runtimeOptions?.params);
       
       // Pass compiled meshes to slideHost for potential use
       slideHost._compiledSceneMeshes = this._compiledSceneMeshes || [];
@@ -302,6 +242,7 @@ export class EngineBridge {
       const slideModule = await WebAssembly.instantiate(pkg.slideWasm, slideHost.buildImports());
       slideHost.setInstance(slideModule.instance);
       slideHost.runStart();
+      slideHost.configureParams(paramsBytes);
 
       // Note: We no longer patch the spec in WASM memory (postcard is variable-length).
       // Instead, we'll modify the decoded spec object below.
@@ -349,8 +290,10 @@ export class EngineBridge {
         spec.lighting = toWorldLightingSpec(this._compiledSceneLighting, spec.lighting);
       }
       
-      const renderer = new VzglydRenderer(this._canvas, spec);
+      const renderer = new VzglydRenderer(this._canvas, spec, this._gpuState);
       await renderer.init();
+      this._gpuState = renderer.gpuState();
+      this._frameStats = createFrameStats();
 
       renderer.applyOverlayBytes(slideHost.readOverlayBytes());
       renderer.applyDynamicMeshBytes(slideHost.readDynamicMeshBytes());
@@ -363,7 +306,7 @@ export class EngineBridge {
           endpointMap: this._hostConfig?.sidecarEndpoints ?? {},
         });
         this._channelState.active = true;
-        await sidecarHost.start(pkg.sidecarWasm.slice());
+        await sidecarHost.start(pkg.sidecarWasm.slice(), paramsBytes ? paramsBytes.slice() : null);
       }
 
       this._renderer = renderer;
@@ -479,13 +422,36 @@ export class EngineBridge {
       : Math.max(0, Math.min(0.25, (timestampMs - this._lastTimestampMs) / 1000));
     this._lastTimestampMs = timestampMs;
 
-    const runtimeStatus = this._slideHost.update(dt);
+    const updateSample = measureCall(() => this._slideHost.update(dt));
+    const runtimeStatus = updateSample.result;
+    let overlayUploadMs = 0;
+    let dynamicUploadMs = 0;
+    let overlayUploaded = false;
+    let dynamicUploaded = false;
+
     if (runtimeStatus !== 0) {
-      this._renderer.applyOverlayBytes(this._slideHost.readOverlayBytes());
-      this._renderer.applyDynamicMeshBytes(this._slideHost.readDynamicMeshBytes());
+      const overlaySample = measureCall(() =>
+        this._renderer.applyOverlayBytes(this._slideHost.readOverlayBytes()),
+      );
+      overlayUploadMs = overlaySample.durationMs;
+      overlayUploaded = overlaySample.result;
+
+      const dynamicSample = measureCall(() =>
+        this._renderer.applyDynamicMeshBytes(this._slideHost.readDynamicMeshBytes()),
+      );
+      dynamicUploadMs = dynamicSample.durationMs;
+      dynamicUploaded = dynamicSample.result;
     }
 
-    this._renderer.renderFrame(dt);
+    const renderSample = measureCall(() => this._renderer.renderFrame(dt));
+    recordFrameStats(this._frameStats, {
+      updateMs: updateSample.durationMs,
+      overlayUploadMs,
+      dynamicUploadMs,
+      renderMs: renderSample.durationMs,
+      overlayUploaded,
+      dynamicUploaded,
+    });
   }
 
   teardown() {
@@ -509,6 +475,7 @@ export class EngineBridge {
     this._compiledSceneMeshes = [];
     this._compiledSceneCameraPath = null;
     this._compiledSceneLighting = null;
+    this._frameStats = createFrameStats();
   }
 
   stats() {
@@ -520,6 +487,7 @@ export class EngineBridge {
       manifestName: this._manifestName,
       sidecarActive: Boolean(this._sidecarHost),
       lastError: this._lastError,
+      ...this._frameStats,
     };
   }
 }

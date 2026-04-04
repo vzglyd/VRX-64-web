@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { normalizeCustomShaderBody } from './renderer.js';
+import {
+  normalizeCustomShaderBody,
+  shouldUploadRuntimeBytes,
+} from './renderer.js';
 
 const FULL_MODULE = `
 @vertex
@@ -94,4 +97,20 @@ test('rejects duplicate entry points inside one shader blob', () => {
   assert.equal(result.body, null);
   assert.match(result.error, /duplicate entry points inside a single source blob/);
   assert.deepEqual(result.infos, []);
+});
+
+test('skips runtime uploads when the byte fingerprint is unchanged', () => {
+  const first = shouldUploadRuntimeBytes(null, new Uint8Array([1, 2, 3, 4]));
+  assert.equal(first.shouldUpload, true);
+
+  const second = shouldUploadRuntimeBytes(first.fingerprint, new Uint8Array([1, 2, 3, 4]));
+  assert.equal(second.shouldUpload, false);
+});
+
+test('uploads runtime bytes again when the payload changes', () => {
+  const first = shouldUploadRuntimeBytes(null, new Uint8Array([1, 2, 3, 4]));
+  const second = shouldUploadRuntimeBytes(first.fingerprint, new Uint8Array([1, 2, 3, 5]));
+
+  assert.equal(second.shouldUpload, true);
+  assert.notEqual(second.fingerprint, first.fingerprint);
 });

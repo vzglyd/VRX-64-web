@@ -3,17 +3,17 @@
 //! This module provides functionality to load GLB files and compile them
 //! into slide specs that can be rendered by the web host.
 
+use glam::{Mat3, Mat4, Vec3};
 use serde::{Deserialize, Serialize};
+use vzglyd_kernel::{ImportedCameraProjection, ImportedSceneCamera};
 use vzglyd_kernel::{
     ImportedScene, ImportedSceneMeshNode,
-    glb::{SceneAssetRef, ImportedSceneMaterial},
+    glb::{ImportedSceneMaterial, SceneAssetRef},
 };
-use vzglyd_kernel::{ImportedCameraProjection, ImportedSceneCamera};
 use vzglyd_slide::{
     CameraKeyframe, MeshAsset, MeshAssetVertex, PipelineKind, SceneAnchor, SceneAnchorSet,
 };
 use wasm_bindgen::prelude::*;
-use glam::{Mat3, Mat4, Vec3};
 
 /// Result type for GLB loading operations.
 pub type GlbResult<T> = Result<T, JsValue>;
@@ -147,34 +147,42 @@ pub fn load_glb_scene(
     // Parse scene_ref from JSON if provided
     let kernel_scene_ref = scene_ref_json
         .and_then(|json| {
-            serde_json::from_str::<serde_json::Value>(&json).ok().and_then(|obj| {
-                let path = obj.get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(scene_path)
-                    .to_string();
-                let id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
-                let label = obj.get("label").and_then(|v| v.as_str()).map(String::from);
-                let entry_camera = obj.get("entryCamera").and_then(|v| v.as_str()).map(String::from);
-                let compile_profile = obj.get("compileProfile").and_then(|v| v.as_str()).map(String::from);
-                
-                Some(SceneAssetRef {
-                    path,
-                    id,
-                    label,
-                    entry_camera,
-                    compile_profile,
+            serde_json::from_str::<serde_json::Value>(&json)
+                .ok()
+                .and_then(|obj| {
+                    let path = obj
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(scene_path)
+                        .to_string();
+                    let id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
+                    let label = obj.get("label").and_then(|v| v.as_str()).map(String::from);
+                    let entry_camera = obj
+                        .get("entryCamera")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let compile_profile = obj
+                        .get("compileProfile")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
+                    Some(SceneAssetRef {
+                        path,
+                        id,
+                        label,
+                        entry_camera,
+                        compile_profile,
+                    })
                 })
-            })
         })
         .unwrap_or_else(|| SceneAssetRef::new(scene_path.to_string()));
-    
+
     // Load the scene directly from bytes (no filesystem needed)
     let imported = load_glb_scene_from_bytes(glb_bytes, scene_path, &kernel_scene_ref)?;
-    
+
     // Compile the scene
-    let compiled = compile_imported_scene(&imported)
-        .map_err(|e| JsValue::from_str(&e))?;
-    
+    let compiled = compile_imported_scene(&imported).map_err(|e| JsValue::from_str(&e))?;
+
     // Serialize to JSON and return as JsValue
     serde_json::to_string(&compiled)
         .map(|json_str| JsValue::from_str(&json_str))
@@ -190,10 +198,14 @@ fn load_glb_scene_from_bytes(
     // Parse GLB directly from bytes
     let gltf = gltf::Gltf::from_slice(glb_bytes)
         .map_err(|e| JsValue::from_str(&format!("Failed to parse GLB '{}': {e}", scene_path)))?;
-    
-    let blob = gltf.blob.as_deref()
-        .ok_or_else(|| JsValue::from_str(&format!("GLB '{}' is missing its binary buffer chunk", scene_path)))?;
-    
+
+    let blob = gltf.blob.as_deref().ok_or_else(|| {
+        JsValue::from_str(&format!(
+            "GLB '{}' is missing its binary buffer chunk",
+            scene_path
+        ))
+    })?;
+
     // Validate buffers are all binary (no external URIs)
     for buffer in gltf.document.buffers() {
         if !matches!(buffer.source(), gltf::buffer::Source::Bin) {
@@ -203,31 +215,44 @@ fn load_glb_scene_from_bytes(
             )));
         }
     }
-    
+
     // Get the default scene or first scene
-    let gltf_scene = gltf.document.default_scene()
+    let gltf_scene = gltf
+        .document
+        .default_scene()
         .or_else(|| gltf.document.scenes().next())
-        .ok_or_else(|| JsValue::from_str(&format!("GLB '{}' does not declare a scene to import", scene_path)))?;
-    
+        .ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "GLB '{}' does not declare a scene to import",
+                scene_path
+            ))
+        })?;
+
     let scene_name = gltf_scene.name().map(str::to_owned);
     let file_stem = std::path::Path::new(scene_path)
         .file_stem()
         .and_then(|stem| stem.to_str())
         .map(str::to_owned);
-    
-    let scene_id = scene_ref.id.clone()
+
+    let scene_id = scene_ref
+        .id
+        .clone()
         .or_else(|| scene_name.clone())
         .or_else(|| file_stem.clone())
         .unwrap_or_else(|| "scene".to_string());
-    
+
     let mut imported = ImportedScene {
         id: scene_id.clone(),
         source_path: std::path::PathBuf::from(scene_path),
-        label: scene_ref.label.clone()
+        label: scene_ref
+            .label
+            .clone()
             .or_else(|| scene_name.clone())
             .or_else(|| file_stem.clone()),
         entry_camera: scene_ref.entry_camera.clone(),
-        compile_profile: scene_ref.compile_profile.clone()
+        compile_profile: scene_ref
+            .compile_profile
+            .clone()
             .or_else(|| Some("default_world".to_string())),
         metadata: vzglyd_kernel::ImportedSceneMetadata {
             scene_name,
@@ -239,12 +264,12 @@ fn load_glb_scene_from_bytes(
         directional_lights: Vec::new(),
         warnings: Vec::new(),
     };
-    
+
     // Process all nodes in the scene
     for node in gltf_scene.nodes() {
         append_glb_scene_node(&mut imported, node, Mat4::IDENTITY, blob, scene_path)?;
     }
-    
+
     Ok(imported)
 }
 
@@ -257,12 +282,14 @@ fn append_glb_scene_node(
     scene_path: &str,
 ) -> Result<(), JsValue> {
     use vzglyd_kernel::ImportedSceneDirectionalLight;
-    
+
     let local_transform = Mat4::from_cols_array_2d(&node.transform().matrix());
     let world_transform = parent_transform * local_transform;
     let node_name = node.name().map(str::to_owned);
-    let display_name = node_name.clone().unwrap_or_else(|| format!("node_{}", node.index()));
-    
+    let display_name = node_name
+        .clone()
+        .unwrap_or_else(|| format!("node_{}", node.index()));
+
     let metadata = parse_imported_extras(
         node.extras(),
         &format!("node '{display_name}'"),
@@ -390,14 +417,16 @@ fn append_glb_scene_node(
 
     let is_anchor = metadata.vzglyd_anchor_tagged || metadata.vzglyd_id.is_some();
     if mesh.is_none() && camera.is_none() && light.is_none() && is_anchor {
-        imported_scene.anchors.push(vzglyd_kernel::ImportedSceneAnchor {
-            id: stable_anchor_id(&metadata, node_name.as_deref(), node.index()),
-            label: anchor_label(node_name.as_deref(), node.index()),
-            node_name: node_name.clone(),
-            node_index: node.index(),
-            world_transform: world_transform.to_cols_array_2d(),
-            metadata: metadata.clone(),
-        });
+        imported_scene
+            .anchors
+            .push(vzglyd_kernel::ImportedSceneAnchor {
+                id: stable_anchor_id(&metadata, node_name.as_deref(), node.index()),
+                label: anchor_label(node_name.as_deref(), node.index()),
+                node_name: node_name.clone(),
+                node_index: node.index(),
+                world_transform: world_transform.to_cols_array_2d(),
+                metadata: metadata.clone(),
+            });
     } else if mesh.is_none() && camera.is_none() && light.is_none() && children.is_empty() {
         imported_scene.warnings.push(format!(
             "ignored unsupported empty node '{display_name}' while importing scene '{}'",
@@ -435,9 +464,12 @@ fn import_scene_primitive(
     });
     let positions: Vec<[f32; 3]> = reader
         .read_positions()
-        .ok_or_else(|| JsValue::from_str(&format!(
-            "GLB '{}' contains a primitive without POSITION data", scene_path
-        )))?
+        .ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "GLB '{}' contains a primitive without POSITION data",
+                scene_path
+            ))
+        })?
         .collect();
     let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(Iterator::collect);
     let tex_coords: Option<Vec<[f32; 2]>> = reader
@@ -450,10 +482,11 @@ fn import_scene_primitive(
         .read_indices()
         .map(|indices| indices.into_u32().collect())
         .unwrap_or_else(|| (0..positions.len() as u32).collect());
-    
+
     if positions.len() > u16::MAX as usize + 1 {
         return Err(JsValue::from_str(&format!(
-            "GLB '{}' exceeds the engine's u16 static mesh index limit", scene_path
+            "GLB '{}' exceeds the engine's u16 static mesh index limit",
+            scene_path
         )));
     }
 
@@ -500,7 +533,8 @@ fn import_scene_primitive(
     for index in primitive_indices {
         let final_index = u16::try_from(index).map_err(|_| {
             JsValue::from_str(&format!(
-                "GLB '{}' produced an index outside the engine's u16 range", scene_path
+                "GLB '{}' produced an index outside the engine's u16 range",
+                scene_path
             ))
         })?;
         imported.indices.push(final_index);
@@ -529,17 +563,17 @@ fn compile_imported_scene(imported: &ImportedScene) -> Result<CompiledScene, Str
         .iter()
         .filter(|node| !node.metadata.vzglyd_hidden)
         .collect();
-    
+
     if visible_mesh_nodes.is_empty() {
         return Err(format!("Scene '{}' has no visible meshes", imported.id));
     }
-    
+
     // Compile meshes
     let mut meshes = Vec::with_capacity(visible_mesh_nodes.len());
     for mesh_node in &visible_mesh_nodes {
         let material_class = resolve_scene_material_class(mesh_node);
         let pipeline = resolve_scene_pipeline(mesh_node, material_class);
-        
+
         let vertices = mesh_node
             .vertices
             .iter()
@@ -550,7 +584,7 @@ fn compile_imported_scene(imported: &ImportedScene) -> Result<CompiledScene, Str
                 mode: scene_material_mode(material_class),
             })
             .collect();
-        
+
         meshes.push(CompiledSceneMesh {
             id: mesh_node.id.clone(),
             label: mesh_node.label.clone(),
@@ -562,7 +596,7 @@ fn compile_imported_scene(imported: &ImportedScene) -> Result<CompiledScene, Str
             },
         });
     }
-    
+
     // Compile anchors
     let anchors = imported
         .anchors
@@ -574,13 +608,13 @@ fn compile_imported_scene(imported: &ImportedScene) -> Result<CompiledScene, Str
             tag: anchor.metadata.vzglyd_anchor.clone(),
         })
         .collect();
-    
+
     // Compile camera path
     let camera_path = compile_scene_camera_path(imported, &visible_mesh_nodes);
-    
+
     // Compile lighting
     let lighting = compile_scene_lighting(imported);
-    
+
     Ok(CompiledScene {
         id: imported.id.clone(),
         label: imported.label.clone(),
@@ -599,12 +633,14 @@ fn resolve_scene_material_class(mesh_node: &ImportedSceneMeshNode) -> SceneMater
         .as_deref()
         .or(mesh_node.material.metadata.vzglyd_material.as_deref())
         .or(mesh_node.material.class_hint.as_deref());
-    
+
     let normalized = hint.map(|s| s.trim().to_ascii_lowercase().replace([' ', '-'], "_"));
-    
+
     match normalized.as_deref() {
         Some("alpha_test") | Some("alphatest") | Some("cutout") => SceneMaterialClass::AlphaTest,
-        Some("transparent") | Some("alpha_blend") | Some("blend") => SceneMaterialClass::Transparent,
+        Some("transparent") | Some("alpha_blend") | Some("blend") => {
+            SceneMaterialClass::Transparent
+        }
         Some("emissive") => SceneMaterialClass::Emissive,
         Some("water") => SceneMaterialClass::Water,
         Some("opaque") => SceneMaterialClass::Opaque,
@@ -626,7 +662,7 @@ fn resolve_scene_pipeline(
     } else {
         PipelineKind::Opaque
     };
-    
+
     match mesh_node
         .metadata
         .vzglyd_pipeline
@@ -664,7 +700,7 @@ fn compile_scene_camera_path(
         .iter()
         .filter(|cam| !cam.metadata.vzglyd_hidden)
         .collect();
-    
+
     // Find entry camera
     let entry_camera = imported.entry_camera.as_deref().and_then(|selector| {
         let selector = normalize_scene_token(selector);
@@ -679,17 +715,28 @@ fn compile_scene_camera_path(
             .any(|name| normalize_scene_token(name) == selector)
         })
     });
-    
+
     let selected_camera = entry_camera
-        .or_else(|| visible_cameras.iter().copied().find(|cam| cam.metadata.vzglyd_entry_camera))
+        .or_else(|| {
+            visible_cameras
+                .iter()
+                .copied()
+                .find(|cam| cam.metadata.vzglyd_entry_camera)
+        })
         .or_else(|| visible_cameras.first().copied());
-    
+
     let keyframes = match selected_camera {
         Some(camera) => {
             let keyframe = scene_camera_keyframe(camera, 0.0);
             vec![
-                CameraKeyframe { time: 0.0, ..keyframe.clone() },
-                CameraKeyframe { time: FIXED_CAMERA_DURATION_SECONDS, ..keyframe },
+                CameraKeyframe {
+                    time: 0.0,
+                    ..keyframe.clone()
+                },
+                CameraKeyframe {
+                    time: FIXED_CAMERA_DURATION_SECONDS,
+                    ..keyframe
+                },
             ]
         }
         None => {
@@ -699,7 +746,7 @@ fn compile_scene_camera_path(
             let center = (min + max) * 0.5;
             let extent = (max - min).max(Vec3::splat(1.0));
             let radius = extent.max_element().max(1.0);
-            
+
             let keyframe = CameraKeyframe {
                 time: 0.0,
                 position: (center + Vec3::new(radius * 1.4, radius, radius * 1.4)).to_array(),
@@ -708,12 +755,18 @@ fn compile_scene_camera_path(
                 fov_y_deg: 50.0,
             };
             vec![
-                CameraKeyframe { time: 0.0, ..keyframe.clone() },
-                CameraKeyframe { time: FIXED_CAMERA_DURATION_SECONDS, ..keyframe },
+                CameraKeyframe {
+                    time: 0.0,
+                    ..keyframe.clone()
+                },
+                CameraKeyframe {
+                    time: FIXED_CAMERA_DURATION_SECONDS,
+                    ..keyframe
+                },
             ]
         }
     };
-    
+
     // If multiple cameras, create a looping path
     let looped = visible_cameras.len() > 1 && entry_camera.is_none();
     if looped {
@@ -724,24 +777,30 @@ fn compile_scene_camera_path(
             .collect();
         Some(CompiledCameraPath {
             looped: true,
-            keyframes: keyframes.into_iter().map(|k| CompiledCameraKeyframe {
-                time: k.time,
-                position: k.position,
-                target: k.target,
-                up: k.up,
-                fov_y_deg: k.fov_y_deg,
-            }).collect(),
+            keyframes: keyframes
+                .into_iter()
+                .map(|k| CompiledCameraKeyframe {
+                    time: k.time,
+                    position: k.position,
+                    target: k.target,
+                    up: k.up,
+                    fov_y_deg: k.fov_y_deg,
+                })
+                .collect(),
         })
     } else {
         Some(CompiledCameraPath {
             looped: false,
-            keyframes: keyframes.into_iter().map(|k| CompiledCameraKeyframe {
-                time: k.time,
-                position: k.position,
-                target: k.target,
-                up: k.up,
-                fov_y_deg: k.fov_y_deg,
-            }).collect(),
+            keyframes: keyframes
+                .into_iter()
+                .map(|k| CompiledCameraKeyframe {
+                    time: k.time,
+                    position: k.position,
+                    target: k.target,
+                    up: k.up,
+                    fov_y_deg: k.fov_y_deg,
+                })
+                .collect(),
         })
     }
 }
@@ -757,20 +816,29 @@ fn scene_camera_keyframe(camera: &ImportedSceneCamera, time: f32) -> CameraKeyfr
     let eye = transform.transform_point3(Vec3::ZERO);
     let forward = transform.transform_vector3(-Vec3::Z).normalize_or_zero();
     let up = transform.transform_vector3(Vec3::Y).normalize_or_zero();
-    let target = eye + if forward.length_squared() > 0.0 { forward } else { -Vec3::Z };
-    
+    let target = eye
+        + if forward.length_squared() > 0.0 {
+            forward
+        } else {
+            -Vec3::Z
+        };
+
     let fov_y_deg = match camera.projection {
         ImportedCameraProjection::Perspective { yfov_rad, .. } => yfov_rad.to_degrees(),
         ImportedCameraProjection::Orthographic { ymag, .. } => {
             (2.0 * ymag.max(0.1).atan()).to_degrees().clamp(20.0, 100.0)
         }
     };
-    
+
     CameraKeyframe {
         time,
         position: eye.to_array(),
         target: target.to_array(),
-        up: if up.length_squared() > 0.0 { up.to_array() } else { Vec3::Y.to_array() },
+        up: if up.length_squared() > 0.0 {
+            up.to_array()
+        } else {
+            Vec3::Y.to_array()
+        },
         fov_y_deg: fov_y_deg.clamp(20.0, 100.0),
     }
 }
@@ -793,17 +861,17 @@ fn compiled_scene_bounds(mesh_nodes: &[&ImportedSceneMeshNode]) -> Option<(Vec3,
 /// Compile lighting from imported scene.
 fn compile_scene_lighting(imported: &ImportedScene) -> Option<CompiledWorldLighting> {
     use vzglyd_kernel::ImportedSceneDirectionalLight;
-    
+
     let visible_lights: Vec<&ImportedSceneDirectionalLight> = imported
         .directional_lights
         .iter()
         .filter(|light| !light.metadata.vzglyd_hidden)
         .collect();
-    
+
     if visible_lights.is_empty() {
         return None;
     }
-    
+
     if visible_lights.len() > 1 {
         log::warn!(
             "Scene '{}' has {} directional lights; using only the first",
@@ -811,7 +879,7 @@ fn compile_scene_lighting(imported: &ImportedScene) -> Option<CompiledWorldLight
             visible_lights.len()
         );
     }
-    
+
     let light = visible_lights[0];
     Some(CompiledWorldLighting {
         directional_light: Some(CompiledDirectionalLight {
@@ -827,7 +895,7 @@ fn compile_scene_lighting(imported: &ImportedScene) -> Option<CompiledWorldLight
 pub fn encode_mesh_asset(mesh_json: &str) -> Result<JsValue, JsValue> {
     let mesh: CompiledSceneMesh = serde_json::from_str(mesh_json)
         .map_err(|e| JsValue::from_str(&format!("Parse error: {e}")))?;
-    
+
     let mesh_asset = MeshAsset {
         vertices: mesh
             .vertices
@@ -841,10 +909,10 @@ pub fn encode_mesh_asset(mesh_json: &str) -> Result<JsValue, JsValue> {
             .collect(),
         indices: mesh.indices.clone(),
     };
-    
+
     let encoded = postcard::to_stdvec(&mesh_asset)
         .map_err(|e| JsValue::from_str(&format!("Encoding error: {e}")))?;
-    
+
     // Return as Uint8Array
     let arr = js_sys::Uint8Array::from(encoded.as_slice());
     Ok(arr.into())
@@ -855,7 +923,7 @@ pub fn encode_mesh_asset(mesh_json: &str) -> Result<JsValue, JsValue> {
 pub fn encode_scene_anchor_set(scene_json: &str) -> Result<JsValue, JsValue> {
     let scene: CompiledScene = serde_json::from_str(scene_json)
         .map_err(|e| JsValue::from_str(&format!("Parse error: {e}")))?;
-    
+
     let anchor_set = SceneAnchorSet {
         scene_id: scene.id.clone(),
         scene_label: scene.label.clone(),
@@ -872,7 +940,7 @@ pub fn encode_scene_anchor_set(scene_json: &str) -> Result<JsValue, JsValue> {
             })
             .collect(),
     };
-    
+
     let encoded = postcard::to_stdvec(&anchor_set)
         .map_err(|e| JsValue::from_str(&format!("Encoding error: {e}")))?;
 
@@ -890,7 +958,7 @@ fn parse_imported_extras(
     warnings: &mut Vec<String>,
 ) -> vzglyd_kernel::ImportedExtras {
     use serde_json::Value as JsonValue;
-    
+
     let Some(raw) = extras.as_ref() else {
         return vzglyd_kernel::ImportedExtras::default();
     };
@@ -929,7 +997,9 @@ fn read_extra_string(
     match extras.get(key) {
         Some(serde_json::Value::String(value)) => Some(value.clone()),
         Some(other) => {
-            warnings.push(format!("ignored non-string extras key '{key}' on {context}: {other}"));
+            warnings.push(format!(
+                "ignored non-string extras key '{key}' on {context}: {other}"
+            ));
             None
         }
         None => None,
@@ -945,7 +1015,9 @@ fn read_extra_bool(
     match extras.get(key) {
         Some(serde_json::Value::Bool(value)) => *value,
         Some(other) => {
-            warnings.push(format!("ignored non-bool extras key '{key}' on {context}: {other}"));
+            warnings.push(format!(
+                "ignored non-bool extras key '{key}' on {context}: {other}"
+            ));
             false
         }
         None => false,
@@ -962,7 +1034,9 @@ fn read_extra_anchor(
         Some(serde_json::Value::Bool(true)) | None => None,
         Some(serde_json::Value::Bool(false)) => None,
         Some(other) => {
-            warnings.push(format!("ignored unsupported extras key 'vzglyd_anchor' on {context}: {other}"));
+            warnings.push(format!(
+                "ignored unsupported extras key 'vzglyd_anchor' on {context}: {other}"
+            ));
             None
         }
     }
@@ -978,7 +1052,9 @@ fn read_extra_anchor_tagged(
         Some(serde_json::Value::Bool(value)) => *value,
         None => false,
         Some(other) => {
-            warnings.push(format!("ignored unsupported extras key 'vzglyd_anchor' on {context}: {other}"));
+            warnings.push(format!(
+                "ignored unsupported extras key 'vzglyd_anchor' on {context}: {other}"
+            ));
             false
         }
     }
