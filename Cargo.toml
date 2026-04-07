@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Browser host for VZGLYD slide bundles"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/vzglyd/vzglyd"
+repository = "https://github.com/vzglyd/VRX-64-web"
 rust-version = "1.85"
 
 [lib]
@@ -31,8 +31,8 @@ web-sys = { version = "0.3", features = [
 ]}
 
 # Kernel
-vzglyd_kernel = { package = "VRX-64-kernel", path = "../VRX-64-kernel" }
-vzglyd_slide = { package = "VRX-64-slide", path = "../VRX-64-slide" }
+vzglyd_kernel = { package = "VRX-64-kernel", git = "https://github.com/vzglyd/VRX-64-kernel", branch = "main" }
+vzglyd_slide = { package = "VRX-64-slide", git = "https://github.com/vzglyd/VRX-64-slide", branch = "main" }
 bytemuck = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc", "use-std"] }
 glam = "0.29"

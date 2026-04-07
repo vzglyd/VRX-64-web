@@ -6,7 +6,7 @@ version = 4
 name = "VRX-64-kernel"
 version = "0.1.0"
 dependencies = [
- "VRX-64-slide",
+ "VRX-64-slide 0.1.0 (git+https://github.com/vzglyd/VRX-64-slide?branch=main)",
  "bytemuck",
  "glam",
  "gltf",
@@ -28,11 +28,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "VRX-64-slide"
+version = "0.1.0"
+source = "git+https://github.com/vzglyd/VRX-64-slide?branch=main#1b13d95e933f84b763a7c62abe708268b1329c69"
+dependencies = [
+ "bytemuck",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "VRX-64-web"
 version = "0.1.0"
 dependencies = [
  "VRX-64-kernel",
- "VRX-64-slide",
+ "VRX-64-slide 0.1.0",
  "bytemuck",
  "console_error_panic_hook",
  "glam",
