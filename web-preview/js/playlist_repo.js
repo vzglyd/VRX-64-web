@@ -1,5 +1,6 @@
 import { extractBundleManifest } from './bundle_manifest.js';
 import { serializeParamsFromFormValues } from './param_schema.js';
+import { MIN_DISPLAY_DURATION_SECONDS, MAX_DISPLAY_DURATION_SECONDS } from './constants.js';
 
 export const PLAYLIST_FILENAME = 'playlist.json';
 export const TRANSITION_OPTIONS = ['crossfade', 'wipe_left', 'wipe_down', 'dissolve', 'cut'];
@@ -11,8 +12,8 @@ function isPlainObject(value) {
 function normalizeOptionalDuration(value, label) {
   if (value == null) return undefined;
   const seconds = Number(value);
-  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 300) {
-    throw new Error(`${label} must be an integer from 1 to 300`);
+  if (!Number.isInteger(seconds) || seconds < MIN_DISPLAY_DURATION_SECONDS || seconds > MAX_DISPLAY_DURATION_SECONDS) {
+    throw new Error(`${label} must be an integer from ${MIN_DISPLAY_DURATION_SECONDS} to ${MAX_DISPLAY_DURATION_SECONDS}`);
   }
   return seconds;
 }

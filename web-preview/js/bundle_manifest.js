@@ -1,4 +1,5 @@
 import { normalizeParamSchema } from './param_schema.js';
+import { MIN_DISPLAY_DURATION_SECONDS, MAX_DISPLAY_DURATION_SECONDS } from './constants.js';
 
 function isPlainObject(value) {
   return value != null && typeof value === 'object' && !Array.isArray(value);
@@ -60,8 +61,8 @@ function normalizeDisplayConfig(display, label) {
   const normalized = { ...display };
   if (display.duration_seconds != null) {
     const seconds = Number(display.duration_seconds);
-    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 300) {
-      throw new Error(`${label}.duration_seconds must be in [1, 300]`);
+    if (!Number.isInteger(seconds) || seconds < MIN_DISPLAY_DURATION_SECONDS || seconds > MAX_DISPLAY_DURATION_SECONDS) {
+      throw new Error(`${label}.duration_seconds must be in [${MIN_DISPLAY_DURATION_SECONDS}, ${MAX_DISPLAY_DURATION_SECONDS}]`);
     }
     normalized.duration_seconds = seconds;
   }

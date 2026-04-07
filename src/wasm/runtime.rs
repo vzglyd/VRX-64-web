@@ -2,7 +2,7 @@ use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
-#[wasm_bindgen(raw_module = "../js/engine_bridge.js")]
+#[wasm_bindgen(raw_module = "../js/slide_runtime.js")]
 extern "C" {
     #[wasm_bindgen(js_name = EngineBridge)]
     type JsEngineBridge;

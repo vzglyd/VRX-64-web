@@ -317,19 +317,14 @@ function normalize3Into(out, x, y, z) {
 
 function lerp(a, b, t) { return a + (b - a) * t; }
 
-// ── Melbourne clock helper ────────────────────────────────────────────────────
+// ── Local clock helper ────────────────────────────────────────────────────────
 
-function melbourneClockSeconds(nowMs) {
+function localClockSeconds(nowMs) {
   if (!Number.isFinite(nowMs)) {
     return 0;
   }
-  const now = new Date(nowMs);
-  // AEST = UTC+10, AEDT = UTC+11 (Oct–Apr approx)
-  const month = now.getUTCMonth(); // 0-based
-  const isDst = month >= 9 || month <= 3; // Oct(9)..Mar(3) approximate
-  const offsetMs = (isDst ? 11 : 10) * 3600_000;
-  const localMs  = (nowMs + offsetMs) % 86_400_000;
-  return localMs / 1000;
+  const d = new Date(nowMs);
+  return d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds() + d.getMilliseconds() / 1000;
 }
 
 // ── Texture helpers ───────────────────────────────────────────────────────────
@@ -1452,7 +1447,7 @@ export class VzglydRenderer {
     // fog_start: 24, fog_end: 25, clock_seconds: 26, _pad: 27
     data[24] = 18.0;
     data[25] = 75.0;
-    data[26] = melbourneClockSeconds(wallClockMs);
+    data[26] = localClockSeconds(wallClockMs);
     data[27] = 0;
     // ambient_light: 28-31
     data[28] = lighting.ambient_color[0] * ambIntensity;
