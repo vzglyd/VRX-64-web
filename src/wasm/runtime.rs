@@ -1,4 +1,5 @@
-use js_sys::Uint8Array;
+use bytemuck::cast_slice;
+use js_sys::{Date, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -37,11 +38,44 @@ extern "C" {
 
     #[wasm_bindgen(method, js_name = downloadTrace)]
     fn download_trace(this: &JsEngineBridge, filename: JsValue) -> bool;
+
+    /// Returns `{ width: number, height: number }` for the canvas backing size.
+    #[wasm_bindgen(method, js_name = getSurfaceSize)]
+    fn get_surface_size(this: &JsEngineBridge) -> JsValue;
+
+    /// Returns the current slide name string, or `null` if none is loaded.
+    #[wasm_bindgen(method, js_name = getSlideName)]
+    fn get_slide_name(this: &JsEngineBridge) -> JsValue;
+
+    /// Initialize the HUD font atlas in the JS renderer.
+    ///
+    /// `atlas_bytes` is a flat RGBA8 pixel buffer of dimensions
+    /// `atlas_width × atlas_height`. Call once after the renderer is ready.
+    #[wasm_bindgen(method, js_name = initHud)]
+    fn init_hud(
+        this: &JsEngineBridge,
+        atlas_bytes: Uint8Array,
+        atlas_width: u32,
+        atlas_height: u32,
+    );
+
+    /// Push updated HUD geometry to the JS renderer for this frame.
+    ///
+    /// `verts_bytes` is packed [`OverlayVertex`] data (stride 40 bytes).
+    /// `idxs_bytes` is a packed `u16` index buffer.
+    #[wasm_bindgen(method, js_name = applyHudGeometry)]
+    fn apply_hud_geometry(
+        this: &JsEngineBridge,
+        verts_bytes: Uint8Array,
+        idxs_bytes: Uint8Array,
+    );
 }
 
 /// Thin Rust wrapper around the browser-side runtime bridge.
 pub struct RuntimeBridge {
     inner: JsEngineBridge,
+    glyph_map: std::collections::HashMap<char, [f32; 4]>,
+    hud_initialized: bool,
 }
 
 impl RuntimeBridge {
@@ -49,7 +83,49 @@ impl RuntimeBridge {
         let config = config.unwrap_or_else(|| JsValue::NULL);
         Self {
             inner: JsEngineBridge::new(canvas, config),
+            glyph_map: std::collections::HashMap::new(),
+            hud_initialized: false,
         }
+    }
+
+    /// Push fresh HUD geometry for the current frame.
+    ///
+    /// Initializes the font atlas on the first call, then builds and uploads
+    /// geometry using the kernel's pure geometry builder.
+    fn push_hud(&mut self) {
+        // Initialize font atlas once.
+        if !self.hud_initialized {
+            let (pixels, atlas_w, atlas_h, glyph_map) = vzglyd_kernel::build_font_atlas_pixels();
+            let atlas_bytes = Uint8Array::from(pixels.as_slice());
+            self.inner.init_hud(atlas_bytes, atlas_w, atlas_h);
+            self.glyph_map = glyph_map;
+            self.hud_initialized = true;
+        }
+
+        // Get canvas dimensions from JS.
+        let size = self.inner.get_surface_size();
+        let sw = js_f64(&size, "width").unwrap_or(0.0) as u32;
+        let sh = js_f64(&size, "height").unwrap_or(0.0) as u32;
+        if sw == 0 || sh == 0 {
+            return;
+        }
+
+        // Get current slide name.
+        let slide_name_js = self.inner.get_slide_name();
+        let slide_name = slide_name_js.as_string();
+
+        // Build and upload geometry.
+        let clock_str = hud_clock_str();
+        let (verts, idxs) = vzglyd_kernel::build_hud_geometry(
+            &self.glyph_map,
+            sw,
+            sh,
+            slide_name.as_deref(),
+            &clock_str,
+        );
+        let verts_bytes = Uint8Array::from(cast_slice::<_, u8>(&verts));
+        let idxs_bytes = Uint8Array::from(cast_slice::<_, u8>(&idxs));
+        self.inner.apply_hud_geometry(verts_bytes, idxs_bytes);
     }
 
     pub async fn load_bundle(
@@ -64,7 +140,8 @@ impl RuntimeBridge {
             .map(|_| ())
     }
 
-    pub fn frame(&self, timestamp_ms: f64) -> Result<(), JsValue> {
+    pub fn frame(&mut self, timestamp_ms: f64) -> Result<(), JsValue> {
+        self.push_hud();
         self.inner.frame(timestamp_ms).map(|_| ())
     }
 
@@ -96,4 +173,25 @@ impl RuntimeBridge {
             .unwrap_or_else(|| JsValue::UNDEFINED);
         self.inner.download_trace(filename)
     }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Extract a named numeric field from a JS object.
+fn js_f64(obj: &JsValue, key: &str) -> Option<f64> {
+    Reflect::get(obj, &JsValue::from_str(key))
+        .ok()
+        .and_then(|v| v.as_f64())
+}
+
+/// Returns the current local wall-clock time as `"HH:MM:SS"` using the JS
+/// `Date` API (which reports local time, including DST).
+fn hud_clock_str() -> String {
+    let d = Date::new_0();
+    format!(
+        "{:02}:{:02}:{:02}",
+        d.get_hours() as u32,
+        d.get_minutes() as u32,
+        d.get_seconds() as u32,
+    )
 }

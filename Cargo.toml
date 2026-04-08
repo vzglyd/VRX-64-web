@@ -37,3 +37,6 @@ bytemuck = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc", "use-std"] }
 glam = "0.29"
 gltf = { version = "1", default-features = false, features = ["KHR_lights_punctual", "extras", "names", "utils"] }
+
+[patch."https://github.com/vzglyd/VRX-64-kernel"]
+"VRX-64-kernel" = { path = "../VRX-64-kernel" }

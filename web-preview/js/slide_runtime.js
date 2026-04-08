@@ -981,6 +981,40 @@ export class EngineBridge {
     }
     return this._traceRecorder.downloadTrace(filename ?? undefined);
   }
+
+  // ── HUD overlay ────────────────────────────────────────────────────────────
+
+  /** Returns the canvas backing size so Rust can build HUD geometry. */
+  getSurfaceSize() {
+    return {
+      width:  this._canvas?.width  ?? 0,
+      height: this._canvas?.height ?? 0,
+    };
+  }
+
+  /** Returns the current slide name, or null when nothing is loaded. */
+  getSlideName() {
+    return this._slideName || null;
+  }
+
+  /**
+   * Initialize the HUD font atlas in the renderer.
+   * @param {Uint8Array} atlasBytes  flat RGBA8 pixels
+   * @param {number}     atlasWidth
+   * @param {number}     atlasHeight
+   */
+  initHud(atlasBytes, atlasWidth, atlasHeight) {
+    this._renderer?.initHud(atlasBytes, atlasWidth, atlasHeight);
+  }
+
+  /**
+   * Upload pre-built HUD geometry for the upcoming frame.
+   * @param {Uint8Array} vertsBytes  packed OverlayVertex data (stride 40 bytes)
+   * @param {Uint8Array} idxsBytes   packed u16 indices
+   */
+  applyHudGeometry(vertsBytes, idxsBytes) {
+    this._renderer?.applyHudGeometry(vertsBytes, idxsBytes);
+  }
 }
 
 // wasm-bindgen imports this symbol name from the snippet module.

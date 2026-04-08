@@ -387,6 +387,57 @@ function createSamplerFromDesc(device, desc) {
   });
 }
 
+// ── HUD overlay shader ────────────────────────────────────────────────────────
+//
+// Matches the OverlayVertex layout produced by vzglyd_kernel::overlay:
+//   offset  0: position vec2<f32>  (8 bytes)
+//   offset  8: uv       vec2<f32>  (8 bytes)
+//   offset 16: color    vec4<f32>  (16 bytes)
+//   offset 32: mode     f32        (4 bytes)
+//   offset 36: _pad     f32        (4 bytes — alignment, not read by shader)
+//   stride: 40 bytes
+//
+// mode < 0.5 → solid colour quad
+// mode >= 0.5 → font-atlas glyph (samples red channel for alpha)
+
+const HUD_SHADER_SRC = `
+struct HudVertex {
+    @location(0) position: vec2<f32>,
+    @location(1) uv:       vec2<f32>,
+    @location(2) color:    vec4<f32>,
+    @location(3) mode:     f32,
+};
+
+struct HudVaryings {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv:    vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) mode:  f32,
+};
+
+@group(0) @binding(0) var hud_atlas:   texture_2d<f32>;
+@group(0) @binding(1) var hud_sampler: sampler;
+
+@vertex
+fn vs_main(v: HudVertex) -> HudVaryings {
+    var out: HudVaryings;
+    out.clip_pos = vec4<f32>(v.position, 0.0, 1.0);
+    out.uv       = v.uv;
+    out.color    = v.color;
+    out.mode     = v.mode;
+    return out;
+}
+
+@fragment
+fn fs_main(in: HudVaryings) -> @location(0) vec4<f32> {
+    if in.mode < 0.5 {
+        return in.color;
+    }
+    let alpha = textureSample(hud_atlas, hud_sampler, in.uv).r;
+    return vec4<f32>(in.color.rgb, in.color.a * alpha);
+}
+`;
+
 // ── Vertex / index buffer helpers ─────────────────────────────────────────────
 
 function createVertexBuffer(device, floatData, label) {
@@ -959,6 +1010,13 @@ export class VzglydRenderer {
     this._fps = 0;
     this._onFps = null; // optional callback(fps)
 
+    // HUD overlay state (populated by initHud / applyHudGeometry)
+    this._hudPipeline   = null;
+    this._hudBindGroup  = null;
+    this._hudVertexBuf  = null;
+    this._hudIndexBuf   = null;
+    this._hudIndexCount = 0;
+
     this._clearColor = { r: 0, g: 0, b: 0, a: 1 };
     this._backgroundColorAttachment = {
       view: null,
@@ -1401,6 +1459,127 @@ export class VzglydRenderer {
     return wroteMeshBuffer;
   }
 
+  // ── HUD overlay ────────────────────────────────────────────────────────────
+
+  /**
+   * Initialize the HUD pipeline and font atlas texture.
+   * Called once by the Rust host after the surface is ready.
+   * @param {Uint8Array} atlasBytes  flat RGBA8 pixel data
+   * @param {number}     atlasWidth
+   * @param {number}     atlasHeight
+   */
+  initHud(atlasBytes, atlasWidth, atlasHeight) {
+    const device = this._device;
+    if (!device) return;
+
+    const atlasTexture = device.createTexture({
+      label: 'hud_font_atlas',
+      size: [atlasWidth, atlasHeight, 1],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture(
+      { texture: atlasTexture },
+      atlasBytes,
+      { bytesPerRow: atlasWidth * 4 },
+      [atlasWidth, atlasHeight, 1],
+    );
+
+    const bgl = device.createBindGroupLayout({
+      label: 'hud_bgl',
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'float' },
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.FRAGMENT,
+          sampler: { type: 'non-filtering' },
+        },
+      ],
+    });
+
+    this._hudBindGroup = device.createBindGroup({
+      label: 'hud_bind_group',
+      layout: bgl,
+      entries: [
+        { binding: 0, resource: atlasTexture.createView() },
+        { binding: 1, resource: device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' }) },
+      ],
+    });
+
+    const shaderModule = device.createShaderModule({ label: 'hud_shader', code: HUD_SHADER_SRC });
+    const pipelineLayout = device.createPipelineLayout({
+      label: 'hud_pipeline_layout',
+      bindGroupLayouts: [bgl],
+    });
+
+    this._hudPipeline = device.createRenderPipeline({
+      label: 'hud_pipeline',
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: 'vs_main',
+        buffers: [{
+          arrayStride: 40,
+          stepMode: 'vertex',
+          attributes: [
+            { shaderLocation: 0, offset:  0, format: 'float32x2' }, // position
+            { shaderLocation: 1, offset:  8, format: 'float32x2' }, // uv
+            { shaderLocation: 2, offset: 16, format: 'float32x4' }, // color
+            { shaderLocation: 3, offset: 32, format: 'float32'   }, // mode
+          ],
+        }],
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: 'fs_main',
+        targets: [{
+          format: this._format,
+          blend: {
+            color: { srcFactor: 'src-alpha',     dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            alpha: { srcFactor: 'one',            dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          },
+        }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+  }
+
+  /**
+   * Upload pre-built HUD geometry for the upcoming frame.
+   * @param {Uint8Array} vertsBytes  packed OverlayVertex data (stride 40 bytes)
+   * @param {Uint8Array} idxsBytes   packed u16 index data
+   */
+  applyHudGeometry(vertsBytes, idxsBytes) {
+    const device = this._device;
+    if (!device || !this._hudPipeline) return;
+
+    if (!this._hudVertexBuf || this._hudVertexBuf.size < vertsBytes.byteLength) {
+      this._hudVertexBuf?.destroy();
+      this._hudVertexBuf = device.createBuffer({
+        label: 'hud_vertex',
+        size: Math.max(vertsBytes.byteLength, 4096),
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+    }
+    const idxAligned = Math.ceil(idxsBytes.byteLength / 4) * 4;
+    if (!this._hudIndexBuf || this._hudIndexBuf.size < idxAligned) {
+      this._hudIndexBuf?.destroy();
+      this._hudIndexBuf = device.createBuffer({
+        label: 'hud_index',
+        size: Math.max(idxAligned, 1024),
+        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+      });
+    }
+
+    device.queue.writeBuffer(this._hudVertexBuf, 0, vertsBytes);
+    device.queue.writeBuffer(this._hudIndexBuf,  0, idxsBytes);
+    this._hudIndexCount = idxsBytes.byteLength / 2; // u16 = 2 bytes each
+  }
+
   // ── Uniform updates ────────────────────────────────────────────────────────
 
   _writeScreen2DUniforms(elapsed) {
@@ -1603,6 +1782,24 @@ export class VzglydRenderer {
     }
 
     renderPass.end();
+
+    // HUD overlay pass — runs after slide content, before present.
+    if (this._hudPipeline && this._hudIndexCount > 0) {
+      const hudPass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: colorView,
+          loadOp: 'load',
+          storeOp: 'store',
+        }],
+      });
+      hudPass.setPipeline(this._hudPipeline);
+      hudPass.setBindGroup(0, this._hudBindGroup);
+      hudPass.setVertexBuffer(0, this._hudVertexBuf);
+      hudPass.setIndexBuffer(this._hudIndexBuf, 'uint16');
+      hudPass.drawIndexed(this._hudIndexCount);
+      hudPass.end();
+    }
+
     this._queue.submit([encoder.finish()]);
   }
 
