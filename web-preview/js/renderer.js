@@ -430,11 +430,12 @@ fn vs_main(v: HudVertex) -> HudVaryings {
 
 @fragment
 fn fs_main(in: HudVaryings) -> @location(0) vec4<f32> {
-    if in.mode < 0.5 {
-        return in.color;
-    }
-    let alpha = textureSample(hud_atlas, hud_sampler, in.uv).r;
-    return vec4<f32>(in.color.rgb, in.color.a * alpha);
+    // textureSample must be in uniform control flow, so always sample and blend:
+    // solid quads (mode < 0.5) use color.a directly; glyph quads use atlas red.
+    let atlas_r = textureSample(hud_atlas, hud_sampler, in.uv).r;
+    let t = step(0.5, in.mode); // 0.0 for solid, 1.0 for glyph
+    let alpha = mix(in.color.a, in.color.a * atlas_r, t);
+    return vec4<f32>(in.color.rgb, alpha);
 }
 `;
 
