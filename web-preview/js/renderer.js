@@ -795,7 +795,7 @@ function resolveCustomShaderSource(prelude, shaders) {
   };
 }
 
-function createPipeline(device, bgl, shaderSrc, vertexLayout, pipelineKind, format, hasDepth) {
+function createPipeline(device, bgl, shaderSrc, vertexLayout, pipelineKind, format, hasDepth, sceneSpace = 'World3D') {
   const shaderModule = device.createShaderModule({ code: shaderSrc });
 
   const colorTarget = { format };
@@ -810,10 +810,15 @@ function createPipeline(device, bgl, shaderSrc, vertexLayout, pipelineKind, form
     bindGroupLayouts: [bgl],
   });
 
+  // Screen2D transparent quads always face the camera and should render unconditionally.
+  // Using 'always' depth compare and no culling prevents intermittent missing triangles
+  // caused by residual background depth values or viewport-space winding edge cases.
+  const isScreen2DTransparent = sceneSpace === 'Screen2D' && pipelineKind === 'Transparent';
   const depthStencil = hasDepth ? {
     format: 'depth32float',
     depthWriteEnabled: pipelineKind === 'Opaque',
-    depthCompare: pipelineKind === 'Opaque' ? 'less' : 'less-equal',
+    depthCompare: isScreen2DTransparent ? 'always'
+                  : (pipelineKind === 'Opaque' ? 'less' : 'less-equal'),
   } : undefined;
 
   return device.createRenderPipeline({
@@ -830,7 +835,7 @@ function createPipeline(device, bgl, shaderSrc, vertexLayout, pipelineKind, form
     },
     primitive: {
       topology:  'triangle-list',
-      cullMode:  'back',
+      cullMode:  isScreen2DTransparent ? 'none' : 'back',
     },
     depthStencil,
   });
@@ -888,19 +893,19 @@ function patchTextureSampleToLevel(wgsl) {
  * Before the first attempt, proactively patches textureSample → textureSampleLevel
  * so the shader compiles cleanly on strict WebGPU implementations (Edge, Safari).
  */
-async function createPipelineWithFallback(device, bgl, customSrc, defaultSrc, vertexLayout, pipelineKind, format, hasDepth) {
+async function createPipelineWithFallback(device, bgl, customSrc, defaultSrc, vertexLayout, pipelineKind, format, hasDepth, sceneSpace = 'World3D') {
   // Proactively replace textureSample with textureSampleLevel so the shader
   // works under strict uniform-control-flow validation (Edge, Safari).
   const patchedSrc = patchTextureSampleToLevel(customSrc);
 
   device.pushErrorScope('validation');
-  const pipeline = createPipeline(device, bgl, patchedSrc, vertexLayout, pipelineKind, format, hasDepth);
+  const pipeline = createPipeline(device, bgl, patchedSrc, vertexLayout, pipelineKind, format, hasDepth, sceneSpace);
   const err = await device.popErrorScope();
   if (!err) return { pipeline, usedFallback: false };
 
   console.warn(`[vzglyd] Custom ${pipelineKind} shader failed GPU validation after textureSample patch — falling back to default shader.\n${err.message}`);
   return {
-    pipeline: createPipeline(device, bgl, defaultSrc, vertexLayout, pipelineKind, format, hasDepth),
+    pipeline: createPipeline(device, bgl, defaultSrc, vertexLayout, pipelineKind, format, hasDepth, sceneSpace),
     usedFallback: true,
   };
 }
@@ -922,8 +927,8 @@ async function buildPipelines(device, bgl, prelude, customShaders, defaultBody, 
     }
 
     return {
-      opaque: createPipeline(device, bgl, defaultSrc, vertexLayout, 'Opaque', format, hasDepth),
-      transparent: createPipeline(device, bgl, defaultSrc, vertexLayout, 'Transparent', format, hasDepth),
+      opaque: createPipeline(device, bgl, defaultSrc, vertexLayout, 'Opaque', format, hasDepth, sceneSpace),
+      transparent: createPipeline(device, bgl, defaultSrc, vertexLayout, 'Transparent', format, hasDepth, sceneSpace),
       usedFallback: Boolean(resolved.error),
     };
   }
@@ -937,12 +942,13 @@ async function buildPipelines(device, bgl, prelude, customShaders, defaultBody, 
     'Opaque',
     format,
     hasDepth,
+    sceneSpace,
   );
 
   if (opaqueResult.usedFallback) {
     return {
       opaque: opaqueResult.pipeline,
-      transparent: createPipeline(device, bgl, defaultSrc, vertexLayout, 'Transparent', format, hasDepth),
+      transparent: createPipeline(device, bgl, defaultSrc, vertexLayout, 'Transparent', format, hasDepth, sceneSpace),
       usedFallback: true,
     };
   }
@@ -956,6 +962,7 @@ async function buildPipelines(device, bgl, prelude, customShaders, defaultBody, 
     'Transparent',
     format,
     hasDepth,
+    sceneSpace,
   );
 
   return {

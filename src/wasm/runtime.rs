@@ -2,6 +2,7 @@ use bytemuck::cast_slice;
 use js_sys::{Date, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
+use vzglyd_kernel::{build_screensaver_geometry, ScreensaverFrameState};
 
 #[wasm_bindgen(raw_module = "../js/slide_runtime.js")]
 extern "C" {
@@ -76,6 +77,18 @@ pub struct RuntimeBridge {
     inner: JsEngineBridge,
     glyph_map: std::collections::HashMap<char, [f32; 4]>,
     hud_initialized: bool,
+    /// Screensaver timeout in seconds. `None` means disabled.
+    screensaver_timeout_secs: Option<f32>,
+    /// How long the screensaver runs before the playlist resumes.
+    screensaver_duration_secs: f32,
+    /// Accumulated display time since the last screensaver reset.
+    display_elapsed_secs: f32,
+    /// Elapsed time inside the current screensaver run.
+    screensaver_elapsed_secs: f32,
+    /// Whether the screensaver is currently active.
+    screensaver_active: bool,
+    /// Timestamp of the previous frame, used to compute `dt`.
+    last_timestamp_ms: Option<f64>,
 }
 
 impl RuntimeBridge {
@@ -85,15 +98,33 @@ impl RuntimeBridge {
             inner: JsEngineBridge::new(canvas, config),
             glyph_map: std::collections::HashMap::new(),
             hud_initialized: false,
+            screensaver_timeout_secs: None,
+            screensaver_duration_secs: 60.0,
+            display_elapsed_secs: 0.0,
+            screensaver_elapsed_secs: 0.0,
+            screensaver_active: false,
+            last_timestamp_ms: None,
         }
     }
 
-    /// Push fresh HUD geometry for the current frame.
+    /// Configure or disable the screensaver.
     ///
-    /// Initializes the font atlas on the first call, then builds and uploads
-    /// geometry using the kernel's pure geometry builder.
-    fn push_hud(&mut self) {
-        // Initialize font atlas once.
+    /// `timeout_secs` is how long the display runs before activating the screensaver.
+    /// `duration_secs` is how long the screensaver shows before the playlist resumes.
+    /// Set `timeout_secs` to `None` to disable the screensaver entirely.
+    pub fn set_screensaver_config(&mut self, timeout_secs: Option<f32>, duration_secs: f32) {
+        self.screensaver_timeout_secs = timeout_secs;
+        self.screensaver_duration_secs = duration_secs;
+        self.display_elapsed_secs = 0.0;
+        self.screensaver_elapsed_secs = 0.0;
+        self.screensaver_active = false;
+        self.last_timestamp_ms = None;
+    }
+
+    /// Ensure the font atlas is uploaded and return the current canvas dimensions.
+    ///
+    /// Returns `None` if the canvas has zero size (not yet ready).
+    fn ensure_hud_ready(&mut self) -> Option<(u32, u32)> {
         if !self.hud_initialized {
             let (pixels, atlas_w, atlas_h, glyph_map) = vzglyd_kernel::build_font_atlas_pixels();
             let atlas_bytes = Uint8Array::from(pixels.as_slice());
@@ -101,20 +132,18 @@ impl RuntimeBridge {
             self.glyph_map = glyph_map;
             self.hud_initialized = true;
         }
-
-        // Get canvas dimensions from JS.
         let size = self.inner.get_surface_size();
         let sw = js_f64(&size, "width").unwrap_or(0.0) as u32;
         let sh = js_f64(&size, "height").unwrap_or(0.0) as u32;
-        if sw == 0 || sh == 0 {
-            return;
-        }
+        if sw == 0 || sh == 0 { None } else { Some((sw, sh)) }
+    }
 
-        // Get current slide name.
+    /// Push normal HUD geometry (border, footer, slide title, clock).
+    fn push_hud(&mut self) {
+        let Some((sw, sh)) = self.ensure_hud_ready() else { return };
+
         let slide_name_js = self.inner.get_slide_name();
         let slide_name = slide_name_js.as_string();
-
-        // Build and upload geometry.
         let clock_str = hud_clock_str();
         let (verts, idxs) = vzglyd_kernel::build_hud_geometry(
             &self.glyph_map,
@@ -126,6 +155,53 @@ impl RuntimeBridge {
         let verts_bytes = Uint8Array::from(cast_slice::<_, u8>(&verts));
         let idxs_bytes = Uint8Array::from(cast_slice::<_, u8>(&idxs));
         self.inner.apply_hud_geometry(verts_bytes, idxs_bytes);
+    }
+
+    /// Push screensaver geometry (full-screen black + drifting "Intermission" + countdown).
+    fn push_screensaver_geometry(&mut self, state: &ScreensaverFrameState) {
+        let Some((sw, sh)) = self.ensure_hud_ready() else { return };
+
+        let (verts, idxs) = build_screensaver_geometry(
+            &self.glyph_map,
+            sw,
+            sh,
+            state.elapsed_secs,
+            state.remaining_secs,
+        );
+        let verts_bytes = Uint8Array::from(cast_slice::<_, u8>(&verts));
+        let idxs_bytes = Uint8Array::from(cast_slice::<_, u8>(&idxs));
+        self.inner.apply_hud_geometry(verts_bytes, idxs_bytes);
+    }
+
+    /// Advance the screensaver state machine and return the current state if active.
+    fn tick_screensaver(&mut self, dt: f32) -> Option<ScreensaverFrameState> {
+        let timeout = self.screensaver_timeout_secs?;
+        let duration = self.screensaver_duration_secs;
+
+        if self.screensaver_active {
+            self.screensaver_elapsed_secs += dt;
+            if self.screensaver_elapsed_secs >= duration {
+                self.screensaver_active = false;
+                self.screensaver_elapsed_secs = 0.0;
+                self.display_elapsed_secs = 0.0;
+            }
+        } else {
+            self.display_elapsed_secs += dt;
+            if self.display_elapsed_secs >= timeout {
+                self.screensaver_active = true;
+                self.screensaver_elapsed_secs = 0.0;
+            }
+        }
+
+        if self.screensaver_active {
+            Some(ScreensaverFrameState {
+                remaining_secs: (duration - self.screensaver_elapsed_secs).max(0.0),
+                total_secs: duration,
+                elapsed_secs: self.screensaver_elapsed_secs,
+            })
+        } else {
+            None
+        }
     }
 
     pub async fn load_bundle(
@@ -141,7 +217,22 @@ impl RuntimeBridge {
     }
 
     pub fn frame(&mut self, timestamp_ms: f64) -> Result<(), JsValue> {
-        self.push_hud();
+        // Compute dt from the timestamp delta, clamped to avoid large jumps on tab resume.
+        let dt = if let Some(prev) = self.last_timestamp_ms {
+            ((timestamp_ms - prev) / 1000.0).clamp(0.0, 0.5) as f32
+        } else {
+            0.0
+        };
+        self.last_timestamp_ms = Some(timestamp_ms);
+
+        // Advance the screensaver state machine and push appropriate geometry.
+        let ss_state = self.tick_screensaver(dt);
+        if let Some(ref state) = ss_state {
+            self.push_screensaver_geometry(state);
+        } else {
+            self.push_hud();
+        }
+
         self.inner.frame(timestamp_ms).map(|_| ())
     }
 

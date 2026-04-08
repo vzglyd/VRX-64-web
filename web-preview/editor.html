@@ -92,6 +92,37 @@
       </div>
     </section>
 
+    <section class="panel" id="secrets-shell" hidden>
+      <div class="panel-head">
+        <div>
+          <h2>Secrets</h2>
+          <p class="hint">Environment variables injected into slides at runtime (e.g. API keys). Manage these locally — they are never sent to the repo.</p>
+        </div>
+      </div>
+
+      <div class="secrets-warning" id="secrets-warning">
+        &#9888; Do not commit <code>secrets.json</code> to a public repository &mdash; it contains plaintext API keys and credentials.
+      </div>
+
+      <div id="secrets-list" class="secrets-list"></div>
+
+      <div class="secrets-add-form">
+        <label class="field grow">
+          <span>Key</span>
+          <input id="secrets-new-key" type="text" placeholder="LASTFM_API_KEY" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field grow">
+          <span>Value</span>
+          <input id="secrets-new-value" type="password" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" autocomplete="new-password" />
+        </label>
+        <button id="secrets-add-btn" class="secondary-btn" type="button">Add</button>
+      </div>
+
+      <div class="inline-actions" style="margin-top:0.75rem">
+        <button id="secrets-download-btn" class="secondary-btn" type="button">Download secrets.json</button>
+      </div>
+    </section>
+
     <div id="status-bar" hidden>
       <div id="status-spinner" class="spinner" hidden></div>
       <span id="status-text"></span>

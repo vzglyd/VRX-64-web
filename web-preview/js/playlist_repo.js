@@ -66,6 +66,22 @@ export function validateBundlePath(path, label = 'playlist entry path') {
   return trimmed;
 }
 
+function normalizeScreensaverConfig(value, label) {
+  if (value == null) return undefined;
+  if (!isPlainObject(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const timeoutSeconds = Number(value.timeout_seconds);
+  const durationSeconds = Number(value.duration_seconds);
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1) {
+    throw new Error(`${label}.timeout_seconds must be a positive integer`);
+  }
+  if (!Number.isInteger(durationSeconds) || durationSeconds < 1) {
+    throw new Error(`${label}.duration_seconds must be a positive integer`);
+  }
+  return { timeout_seconds: timeoutSeconds, duration_seconds: durationSeconds };
+}
+
 function normalizeDefaults(defaults) {
   if (defaults == null) {
     return {};
@@ -78,6 +94,7 @@ function normalizeDefaults(defaults) {
   const duration = normalizeOptionalDuration(defaults.duration_seconds, 'playlist.defaults.duration_seconds');
   const transitionIn = normalizeOptionalTransition(defaults.transition_in, 'playlist.defaults.transition_in');
   const transitionOut = normalizeOptionalTransition(defaults.transition_out, 'playlist.defaults.transition_out');
+  const screensaver = normalizeScreensaverConfig(defaults.screensaver, 'playlist.defaults.screensaver');
 
   if (duration == null) {
     delete normalized.duration_seconds;
@@ -95,6 +112,12 @@ function normalizeDefaults(defaults) {
     delete normalized.transition_out;
   } else {
     normalized.transition_out = transitionOut;
+  }
+
+  if (screensaver == null) {
+    delete normalized.screensaver;
+  } else {
+    normalized.screensaver = screensaver;
   }
 
   return normalized;
@@ -422,4 +445,64 @@ export function serializeEditablePlaylist(editablePlaylist) {
 
 export function stringifyPlaylist(playlist) {
   return `${JSON.stringify(validatePlaylist(playlist), null, 2)}\n`;
+}
+
+export const SECRETS_FILENAME = 'secrets.json';
+
+/**
+ * Try to load secrets.json from the repo base URL.
+ *
+ * Returns `{ secretsUrl, secrets }` where `secrets` is a plain `{ key: value }` object,
+ * or `null` if the file was not found (HTTP 404).
+ *
+ * Throws on network errors or malformed JSON.
+ */
+export async function loadSecretsFromRepo(
+  repoBaseUrl,
+  {
+    fetchImpl = fetch,
+    baseHref = globalThis.location?.href ?? 'http://localhost/',
+  } = {},
+) {
+  const normalizedBase = normalizeRepoBaseUrl(repoBaseUrl, baseHref);
+  const secretsUrl = resolveRepoUrl(normalizedBase, SECRETS_FILENAME, baseHref);
+
+  let response;
+  try {
+    response = await fetchImpl(secretsUrl);
+  } catch (error) {
+    throw new Error(`Failed to fetch ${secretsUrl}: ${error.message}`);
+  }
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${secretsUrl}: ${response.status} ${response.statusText}`);
+  }
+
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    throw new Error(`Invalid JSON in ${secretsUrl}: ${error.message}`);
+  }
+
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error(`${secretsUrl}: secrets.json must be a JSON object`);
+  }
+
+  // Validate all values are strings
+  for (const [key, val] of Object.entries(payload)) {
+    if (typeof val !== 'string') {
+      throw new Error(`${secretsUrl}: key "${key}" must have a string value`);
+    }
+  }
+
+  return { secretsUrl, secrets: payload };
+}
+
+export function stringifySecrets(secrets) {
+  return `${JSON.stringify(secrets, null, 2)}\n`;
 }

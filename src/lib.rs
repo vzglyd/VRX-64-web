@@ -60,6 +60,17 @@ impl WebHost {
         self.bridge.frame(timestamp_ms)
     }
 
+    /// Configure the screensaver / burn-in protection.
+    ///
+    /// `timeout_secs` — display seconds before the screensaver activates.
+    /// `duration_secs` — how long the screensaver runs before the playlist resumes.
+    /// Call with `timeout_secs = 0.0` to disable.
+    #[wasm_bindgen(js_name = setScreensaverConfig)]
+    pub fn set_screensaver_config(&mut self, timeout_secs: f32, duration_secs: f32) {
+        let config = if timeout_secs > 0.0 { Some(timeout_secs) } else { None };
+        self.bridge.set_screensaver_config(config, duration_secs);
+    }
+
     /// Dispose runtime resources.
     pub fn teardown(&mut self) {
         self.bridge.teardown();
@@ -105,6 +116,84 @@ pub fn min_display_duration_seconds() -> u32 {
 #[wasm_bindgen(js_name = maxDisplayDurationSeconds)]
 pub fn max_display_duration_seconds() -> u32 {
     vzglyd_kernel::manifest::MAX_DISPLAY_DURATION_SECONDS
+}
+
+// ── Management API ─────────────────────────────────────────────────────────────
+
+/// Hydrate a playlist entry against its manifest and playlist defaults.
+///
+/// All three arguments are JSON strings matching the Rust types:
+/// - `entry_json`: serialized [`PlaylistEntry`]
+/// - `manifest_json`: optional serialized [`SlideManifest`] (pass `undefined`/`null` if unavailable)
+/// - `defaults_json`: serialized [`PlaylistDefaults`]
+///
+/// Returns a serialized [`HydratedPlaylistEntry`] as a JS object, or throws on parse error.
+#[wasm_bindgen(js_name = hydratePlaylistEntry)]
+pub fn hydrate_playlist_entry(
+    entry_json: &str,
+    manifest_json: Option<String>,
+    defaults_json: &str,
+) -> Result<JsValue, JsValue> {
+    use vzglyd_kernel::schedule::{PlaylistDefaults, PlaylistEntry};
+    use vzglyd_kernel::manifest::SlideManifest;
+    use vzglyd_kernel::management::hydrate_entry;
+
+    let entry: PlaylistEntry = serde_json::from_str(entry_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid entry JSON: {e}")))?;
+
+    let manifest: Option<SlideManifest> = manifest_json
+        .as_deref()
+        .map(|s| serde_json::from_str(s))
+        .transpose()
+        .map_err(|e| JsValue::from_str(&format!("invalid manifest JSON: {e}")))?;
+
+    let defaults: PlaylistDefaults = serde_json::from_str(defaults_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid defaults JSON: {e}")))?;
+
+    let hydrated = hydrate_entry(&entry, manifest.as_ref(), &defaults, vzglyd_kernel::ENGINE_DEFAULT_DURATION_SECS);
+    let json = serde_json::to_string(&hydrated)
+        .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+    js_sys::JSON::parse(&json).map_err(|e| e)
+}
+
+/// Validate playlist entry params against a manifest's param schema.
+///
+/// - `params_json`: serialized `serde_json::Value` (the params object), or `"null"`
+/// - `schema_json`: serialized [`ManifestParamsSchema`]
+///
+/// Returns an array of error strings (empty = valid). Throws on parse error.
+#[wasm_bindgen(js_name = validateEntryParams)]
+pub fn validate_entry_params(params_json: &str, schema_json: &str) -> Result<JsValue, JsValue> {
+    use vzglyd_kernel::manifest::ManifestParamsSchema;
+    use vzglyd_kernel::management::validate_params;
+
+    let params: Option<serde_json::Value> = serde_json::from_str(params_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid params JSON: {e}")))?;
+
+    let schema: ManifestParamsSchema = serde_json::from_str(schema_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid schema JSON: {e}")))?;
+
+    let errors = validate_params(params.as_ref(), Some(&schema));
+    let json = serde_json::to_string(&errors)
+        .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+    js_sys::JSON::parse(&json).map_err(|e| e)
+}
+
+/// Parse a `secrets.json` string and return an object containing only the key names.
+///
+/// Values are never exposed to the browser. Returns `{ keys: string[] }`.
+#[wasm_bindgen(js_name = parseSecretsJson)]
+pub fn parse_secrets_json(json: &str) -> Result<JsValue, JsValue> {
+    use vzglyd_kernel::management::SecretsStore;
+
+    let store = SecretsStore::from_json(json)
+        .map_err(|e| JsValue::from_str(&format!("invalid secrets JSON: {e}")))?;
+
+    let keys: Vec<&str> = store.keys();
+    let out = serde_json::json!({ "keys": keys });
+    let out_str = serde_json::to_string(&out)
+        .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+    js_sys::JSON::parse(&out_str).map_err(|e| e)
 }
 
 /// wasm entry hook.

@@ -3,10 +3,12 @@ import {
   emptyEditableEntry,
   loadBundleManifestFromRepo,
   loadPlaylistFromRepo,
+  loadSecretsFromRepo,
   normalizeRepoBaseUrl,
   parseParamsText,
   serializeEditablePlaylist,
   stringifyPlaylist,
+  stringifySecrets,
   toEditablePlaylist,
 } from './js/playlist_repo.js';
 import {
@@ -38,6 +40,12 @@ const statusText = document.getElementById('status-text');
 const errorBox = document.getElementById('error-box');
 const errorText = document.getElementById('error-text');
 const errorDismiss = document.getElementById('error-dismiss');
+const secretsShell = document.getElementById('secrets-shell');
+const secretsList = document.getElementById('secrets-list');
+const secretsNewKey = document.getElementById('secrets-new-key');
+const secretsNewValue = document.getElementById('secrets-new-value');
+const secretsAddBtn = document.getElementById('secrets-add-btn');
+const secretsDownloadBtn = document.getElementById('secrets-download-btn');
 
 const state = {
   repoBaseUrl: null,
@@ -46,6 +54,7 @@ const state = {
   renderedJson: '',
   loadedJson: '',
   metadataRequestId: 0,
+  secrets: null,  // null = not loaded; {} = loaded (may be empty)
 };
 
 function setStatus(message, spinning = false) {
@@ -68,6 +77,43 @@ function showError(message) {
 function hideError() {
   errorBox.hidden = true;
   errorText.textContent = '';
+}
+
+function renderSecretsPanel() {
+  if (state.secrets === null) {
+    secretsShell.hidden = true;
+    return;
+  }
+
+  secretsShell.hidden = false;
+  secretsList.replaceChildren();
+
+  const entries = Object.entries(state.secrets);
+  if (entries.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = 'No secrets stored. Add a key/value pair below.';
+    secretsList.appendChild(empty);
+  } else {
+    for (const [key] of entries) {
+      const row = document.createElement('div');
+      row.className = 'secrets-row';
+      row.innerHTML = `
+        <code class="secrets-key">${escapeHtml(key)}</code>
+        <span class="secrets-value">••••••••</span>
+        <button class="secondary-btn secrets-remove-btn" data-key="${escapeHtml(key)}" type="button">Remove</button>
+      `;
+      secretsList.appendChild(row);
+    }
+  }
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function buildTransitionOptions() {
@@ -756,7 +802,19 @@ async function loadRepo() {
 
     repoUrlInput.value = repo.repoBaseUrl;
     window.localStorage.setItem(REPO_STORAGE_KEY, repo.repoBaseUrl);
+
+    // Try to load secrets.json (graceful — 404 means none saved yet)
+    try {
+      setStatus('Fetching secrets.json...', true);
+      const secretsResult = await loadSecretsFromRepo(repo.repoBaseUrl);
+      state.secrets = secretsResult ? secretsResult.secrets : {};
+    } catch {
+      // Non-fatal: show the panel empty so user can create secrets
+      state.secrets = {};
+    }
+
     renderEditor();
+    renderSecretsPanel();
     await hydrateBundleMetadata();
   } catch (error) {
     showError(error.message);
@@ -924,6 +982,45 @@ function installHandlers() {
   });
 
   errorDismiss.addEventListener('click', hideError);
+
+  secretsAddBtn.addEventListener('click', () => {
+    const key = secretsNewKey.value.trim();
+    const value = secretsNewValue.value;
+    if (!key) {
+      showError('Secret key must not be empty');
+      return;
+    }
+    if (state.secrets === null) {
+      state.secrets = {};
+    }
+    state.secrets[key] = value;
+    secretsNewKey.value = '';
+    secretsNewValue.value = '';
+    renderSecretsPanel();
+  });
+
+  secretsList.addEventListener('click', (event) => {
+    const btn = event.target.closest('.secrets-remove-btn');
+    if (!btn || state.secrets === null) return;
+    const key = btn.dataset.key;
+    if (key !== undefined) {
+      delete state.secrets[key];
+      renderSecretsPanel();
+    }
+  });
+
+  secretsDownloadBtn.addEventListener('click', () => {
+    if (state.secrets === null) return;
+    const json = stringifySecrets(state.secrets);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'secrets.json';
+    link.click();
+    URL.revokeObjectURL(url);
+    setStatus('secrets.json downloaded. Keep this file out of version control.', false);
+  });
 }
 
 function boot() {

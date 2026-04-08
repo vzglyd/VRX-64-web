@@ -701,3 +701,55 @@ a.back:hover {
     justify-content: flex-start;
   }
 }
+
+/* ── Secrets panel ────────────────────────────────────────────── */
+
+.secrets-warning {
+  background: #fffbe6;
+  border: 1px solid #e6a817;
+  border-radius: 6px;
+  padding: 0.6rem 0.85rem;
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
+  color: #7a4f00;
+}
+
+.secrets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+
+.secrets-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: var(--surface-raised, #f5f5f5);
+  border-radius: 6px;
+  padding: 0.45rem 0.75rem;
+}
+
+.secrets-key {
+  flex: 1;
+  font-family: monospace;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.secrets-value {
+  color: var(--text-muted, #888);
+  letter-spacing: 0.1em;
+}
+
+.secrets-remove-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.secrets-add-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: flex-end;
+}
