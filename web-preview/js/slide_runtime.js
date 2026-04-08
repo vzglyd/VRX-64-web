@@ -244,6 +244,7 @@ export class EngineBridge {
     this._slideName = '';
     this._manifestName = '';
     this._lastError = null;
+    this._hudAtlas = null; // cached atlas for re-initializing HUD on new slides
     this._gpuState = null;
     this._compiledSceneMeshes = [];
     this._compiledSceneCameraPath = null;
@@ -590,6 +591,15 @@ export class EngineBridge {
       }
 
       this._renderer = renderer;
+      // Re-apply the HUD atlas to the fresh renderer if one was already
+      // initialized by Rust (which won't call initHud again after first load).
+      if (this._hudAtlas) {
+        renderer.initHud(
+          this._hudAtlas.bytes,
+          this._hudAtlas.width,
+          this._hudAtlas.height,
+        );
+      }
       this._slideHost = slideHost;
       this._sidecarHost = sidecarHost;
       this._slideTraceThread = slideTrace.thread;
@@ -999,11 +1009,15 @@ export class EngineBridge {
 
   /**
    * Initialize the HUD font atlas in the renderer.
+   * The atlas is cached so that newly loaded slides can re-initialize the HUD
+   * without Rust needing to call this again.
    * @param {Uint8Array} atlasBytes  flat RGBA8 pixels
    * @param {number}     atlasWidth
    * @param {number}     atlasHeight
    */
   initHud(atlasBytes, atlasWidth, atlasHeight) {
+    // Keep a copy so new renderers can be initialized after slide transitions.
+    this._hudAtlas = { bytes: atlasBytes.slice(), width: atlasWidth, height: atlasHeight };
     this._renderer?.initHud(atlasBytes, atlasWidth, atlasHeight);
   }
 
