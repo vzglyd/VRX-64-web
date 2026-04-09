@@ -182,6 +182,25 @@ function decodeTextureDesc(d) {
   };
 }
 
+function decodeSoundDesc(d) {
+  return {
+    key:    d.string(),
+    format: decodeSoundFormat(d),
+    data:   d.bytes(),
+  };
+}
+
+function decodeSoundFormat(d) {
+  const v = d.uvarint();
+  switch (v) {
+    case 0: return 'Mp3';
+    case 1: return 'Wav';
+    case 2: return 'Ogg';
+    case 3: return 'Flac';
+    default: throw new Error(`unknown SoundFormat variant ${v}`);
+  }
+}
+
 function decodeScreenVertex(d) {
   return {
     position:   d.f32Array(3),
@@ -362,7 +381,7 @@ function decodeSlideSpec(bytes) {
 
   // Fields in declaration order from vzglyd_slide::SlideSpec<V>:
   //   name, limits, scene_space, camera_path, shaders, overlay, font,
-  //   textures_used, textures, static_meshes, dynamic_meshes, draws, lighting
+  //   textures_used, textures, sounds, static_meshes, dynamic_meshes, draws, lighting
 
   const camera_path = d.option(decodeCameraPath);
   const shaders     = d.option(decodeShaderSources);
@@ -371,6 +390,7 @@ function decodeSlideSpec(bytes) {
 
   const textures_used  = d.uvarint();
   const textures       = d.vec(decodeTextureDesc);
+  const sounds         = d.vec(decodeSoundDesc);
   const static_meshes  = d.vec(function() { return decodeStaticMesh(d, scene_space); });
   const dynamic_meshes = d.vec(decodeDynamicMesh);
   const draws          = d.vec(decodeDrawSpec);
@@ -386,6 +406,7 @@ function decodeSlideSpec(bytes) {
     font,
     textures_used,
     textures,
+    sounds,
     static_meshes,
     dynamic_meshes,
     draws,

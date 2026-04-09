@@ -408,6 +408,58 @@ export class VzglydWasmHost extends BaseWasmHost {
     this._meshAssets = options.meshAssets ?? new Map();
     this._sceneMetadata = options.sceneMetadata ?? new Map();
     this._compiledSceneMeshes = []; // Track compiled scene meshes for spec patching
+    this._sounds = options.sounds ?? new Map(); // key -> ArrayBuffer (raw sound bytes)
+    this._audioContext = options.audioContext ?? null; // Web Audio API context
+    this._decodedSounds = new Map(); // key -> AudioBuffer (decoded)
+    this._activeSounds = new Map(); // id -> { source, gain }
+    this._nextAudioContextResumeId = 1;
+  }
+
+  /**
+   * Initialize the Web Audio API context. Must be called from a user gesture
+   * handler or after the page has been interacted with (browsers block autoplay).
+   */
+  async initAudio() {
+    if (this._audioContext) return;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) {
+      console.warn('[vzglyd] Web Audio API not available');
+      return;
+    }
+    this._audioContext = new Ctx();
+    console.log('[vzglyd] AudioContext created, sample rate:', this._audioContext.sampleRate);
+  }
+
+  /**
+   * Store raw sound bytes for later playback. Called during bundle load.
+   */
+  addSound(key, bytes) {
+    this._sounds.set(key, bytes);
+  }
+
+  /**
+   * Decode a stored sound into an AudioBuffer. Must be called after initAudio().
+   */
+  async decodeSound(key) {
+    if (this._decodedSounds.has(key)) return;
+    const bytes = this._sounds.get(key);
+    if (!bytes) {
+      console.warn('[vzglyd] decodeSound: key not found:', key);
+      return;
+    }
+    if (!this._audioContext) {
+      await this.initAudio();
+    }
+    if (!this._audioContext) return;
+
+    try {
+      const audioBuffer = await this._audioContext.decodeAudioData(
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+      );
+      this._decodedSounds.set(key, audioBuffer);
+    } catch (e) {
+      console.warn('[vzglyd] failed to decode sound', key, e);
+    }
   }
 
   /**
@@ -744,7 +796,118 @@ export class VzglydWasmHost extends BaseWasmHost {
           return HOST_ERROR;
         }
       },
+
+      audio_play(id, keyPtr, keyLen, volume, looped) {
+        try {
+          const key = self._readString(keyPtr >>> 0, keyLen >>> 0);
+          const audioBuffer = self._decodedSounds.get(key);
+          if (!audioBuffer) {
+            console.warn('[vzglyd] audio_play: sound key not decoded:', key);
+            return HOST_ASSET_NOT_FOUND;
+          }
+          // Stop any existing sound with the same id
+          self._stopSoundById(id);
+
+          if (!self._audioContext) {
+            console.warn('[vzglyd] audio_play: no AudioContext');
+            return HOST_ERROR;
+          }
+
+          // Resume audio context if suspended (browser autoplay policy)
+          if (self._audioContext.state === 'suspended') {
+            self._audioContext.resume().catch(() => {});
+          }
+
+          const source = self._audioContext.createBufferSource();
+          source.buffer = audioBuffer;
+          source.loop = !!looped;
+
+          const gain = self._audioContext.createGain();
+          gain.gain.value = Math.max(0, Math.min(1, volume));
+
+          source.connect(gain);
+          gain.connect(self._audioContext.destination);
+          source.start();
+
+          self._activeSounds.set(id, { source, gain });
+          source.onended = () => {
+            self._activeSounds.delete(id);
+          };
+
+          console.log('[vzglyd] audio_play:', id, key, 'vol=' + volume.toFixed(2), 'looped=' + !!looped);
+          return WASI_ESUCCESS;
+        } catch (e) {
+          console.error('[vzglyd] audio_play error:', e);
+          return HOST_ERROR;
+        }
+      },
+
+      audio_stop(id) {
+        try {
+          self._stopSoundById(id);
+          console.log('[vzglyd] audio_stop:', id);
+          return WASI_ESUCCESS;
+        } catch (e) {
+          console.error('[vzglyd] audio_stop error:', e);
+          return HOST_ERROR;
+        }
+      },
+
+      audio_set_volume(id, volume) {
+        try {
+          const sound = self._activeSounds.get(id);
+          if (sound) {
+            sound.gain.gain.value = Math.max(0, Math.min(1, volume));
+          }
+          console.log('[vzglyd] audio_set_volume:', id, 'vol=' + volume.toFixed(2));
+          return WASI_ESUCCESS;
+        } catch (e) {
+          console.error('[vzglyd] audio_set_volume error:', e);
+          return HOST_ERROR;
+        }
+      },
+
+      audio_pause(id) {
+        try {
+          const sound = self._activeSounds.get(id);
+          if (sound && self._audioContext) {
+            // Suspend only this sound's context is not possible; use source pause
+            sound.source.playbackRate.value = 0;
+          }
+          console.log('[vzglyd] audio_pause:', id);
+          return WASI_ESUCCESS;
+        } catch (e) {
+          console.error('[vzglyd] audio_pause error:', e);
+          return HOST_ERROR;
+        }
+      },
+
+      audio_resume(id) {
+        try {
+          const sound = self._activeSounds.get(id);
+          if (sound) {
+            sound.source.playbackRate.value = 1;
+          }
+          console.log('[vzglyd] audio_resume:', id);
+          return WASI_ESUCCESS;
+        } catch (e) {
+          console.error('[vzglyd] audio_resume error:', e);
+          return HOST_ERROR;
+        }
+      },
     };
+  }
+
+  _stopSoundById(id) {
+    const sound = this._activeSounds.get(id);
+    if (sound) {
+      try {
+        sound.source.stop();
+      } catch {
+        // Already stopped
+      }
+      this._activeSounds.delete(id);
+    }
   }
 
   buildImports() {

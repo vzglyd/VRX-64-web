@@ -518,7 +518,29 @@ export class EngineBridge {
       if (this._compiledSceneLighting) {
         spec.lighting = toWorldLightingSpec(this._compiledSceneLighting, spec.lighting);
       }
-      
+
+      // Load sounds from the spec into the slide host
+      const soundLoadStartedMs = nowMs();
+      if (spec.sounds && spec.sounds.length > 0) {
+        console.log('[vzglyd] Loading', spec.sounds.length, 'sounds');
+        for (const sound of spec.sounds) {
+          slideHost.addSound(sound.key, sound.data);
+        }
+        // Decode all sounds asynchronously
+        await Promise.all(spec.sounds.map(s => slideHost.decodeSound(s.key)));
+        this._traceRecorder?.completeAt(
+          slideTrace.thread,
+          'bundle',
+          'load_sounds',
+          soundLoadStartedMs,
+          nowMs() - soundLoadStartedMs,
+          {
+            ...slideTrace.args,
+            sound_count: spec.sounds.length,
+          },
+        );
+      }
+
       const rendererInitStartedMs = nowMs();
       const renderer = new VzglydRenderer(this._canvas, spec, this._gpuState);
       await renderer.init();
