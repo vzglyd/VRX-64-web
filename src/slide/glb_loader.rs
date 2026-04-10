@@ -61,6 +61,32 @@ pub struct CompiledScene {
     pub camera_path: Option<CompiledCameraPath>,
     /// Lighting configuration.
     pub lighting: Option<CompiledWorldLighting>,
+    /// Animation clips extracted from the GLB.
+    pub animations: Vec<CompiledAnimationClip>,
+}
+
+/// An animation clip extracted from a GLB.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompiledAnimationClip {
+    /// Animation name.
+    pub name: String,
+    /// Total duration in seconds.
+    pub duration: f32,
+    /// Per-node animation channels.
+    pub channels: Vec<CompiledAnimationChannel>,
+}
+
+/// A single keyframe channel within an animation clip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompiledAnimationChannel {
+    /// Label of the mesh node this channel targets.
+    pub node_label: String,
+    /// Which transform property is animated.
+    pub path: String, // "translation", "rotation", "scale"
+    /// Keyframe timestamps in seconds.
+    pub keyframe_times: Vec<f32>,
+    /// Keyframe values.
+    pub keyframe_values: Vec<[f32; 4]>,
 }
 
 /// An anchor point in a compiled scene.
@@ -262,6 +288,7 @@ fn load_glb_scene_from_bytes(
         cameras: Vec::new(),
         anchors: Vec::new(),
         directional_lights: Vec::new(),
+        animations: extract_glb_animations(&gltf.document, blob),
         warnings: Vec::new(),
     };
 
@@ -615,6 +642,9 @@ fn compile_imported_scene(imported: &ImportedScene) -> Result<CompiledScene, Str
     // Compile lighting
     let lighting = compile_scene_lighting(imported);
 
+    // Compile animation clips
+    let animations = compile_scene_animations(imported, &visible_mesh_nodes);
+
     Ok(CompiledScene {
         id: imported.id.clone(),
         label: imported.label.clone(),
@@ -622,7 +652,50 @@ fn compile_imported_scene(imported: &ImportedScene) -> Result<CompiledScene, Str
         anchors,
         camera_path,
         lighting,
+        animations,
     })
+}
+
+/// Compile animation clips from an imported scene.
+fn compile_scene_animations(
+    imported: &ImportedScene,
+    visible_mesh_nodes: &[&ImportedSceneMeshNode],
+) -> Vec<CompiledAnimationClip> {
+    let node_label_map: std::collections::HashMap<usize, &str> = visible_mesh_nodes
+        .iter()
+        .map(|node| (node.node_index, node.label.as_str()))
+        .collect();
+
+    imported
+        .animations
+        .iter()
+        .filter_map(|clip| {
+            let mut channels = Vec::new();
+            for ch in &clip.channels {
+                if let Some(&label) = node_label_map.get(&ch.node_index) {
+                    let path = match ch.path {
+                        vzglyd_kernel::AnimationPath::Translation => "translation",
+                        vzglyd_kernel::AnimationPath::Rotation => "rotation",
+                        vzglyd_kernel::AnimationPath::Scale => "scale",
+                    };
+                    channels.push(CompiledAnimationChannel {
+                        node_label: label.to_owned(),
+                        path: path.to_owned(),
+                        keyframe_times: ch.keyframe_times.clone(),
+                        keyframe_values: ch.keyframe_values.clone(),
+                    });
+                }
+            }
+            if channels.is_empty() {
+                return None;
+            }
+            Some(CompiledAnimationClip {
+                name: clip.name.clone(),
+                duration: clip.duration,
+                channels,
+            })
+        })
+        .collect()
 }
 
 /// Resolve material class from mesh node metadata.
@@ -1214,4 +1287,101 @@ fn fill_missing_normals(imported: &mut vzglyd_kernel::ImportedMesh) {
 
 fn multiply_rgba(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     [a[0] * b[0], a[1] * b[1], a[2] * b[2], a[3] * b[3]]
+}
+
+/// Extract animation clips from a GLB document.
+fn extract_glb_animations(
+    document: &gltf::Document,
+    blob: &[u8],
+) -> Vec<vzglyd_kernel::ImportedAnimationClip> {
+    use vzglyd_kernel::{AnimationChannel, AnimationPath, ImportedAnimationClip};
+
+    let animations: Vec<_> = document.animations().collect();
+    if animations.is_empty() {
+        return Vec::new();
+    }
+
+    let buffer_data = |buffer: gltf::Buffer| match buffer.source() {
+        gltf::buffer::Source::Bin => Some(blob),
+        gltf::buffer::Source::Uri(_) => None,
+    };
+
+    let mut clips = Vec::with_capacity(animations.len());
+
+    for (clip_index, animation) in animations.into_iter().enumerate() {
+        let name = animation
+            .name()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("animation_{clip_index}"));
+
+        let mut channels = Vec::new();
+        let mut max_duration: f32 = 0.0;
+
+        for channel in animation.channels() {
+            let target = channel.target();
+            let node = target.node();
+            let reader = channel.reader(buffer_data);
+
+            let times: Vec<f32> = match reader.read_inputs() {
+                Some(iter) => iter.collect(),
+                None => continue,
+            };
+
+            if times.is_empty() {
+                continue;
+            }
+
+            if let Some(&last_time) = times.last() {
+                if last_time > max_duration {
+                    max_duration = last_time;
+                }
+            }
+
+            let path = match target.property() {
+                gltf::animation::Property::Translation => AnimationPath::Translation,
+                gltf::animation::Property::Rotation => AnimationPath::Rotation,
+                gltf::animation::Property::Scale => AnimationPath::Scale,
+                gltf::animation::Property::MorphTargetWeights => continue,
+            };
+
+            let values: Vec<[f32; 4]> = match reader.read_outputs() {
+                Some(gltf::animation::util::ReadOutputs::Translations(iter)) => {
+                    iter.map(|v| [v[0], v[1], v[2], 0.0]).collect()
+                }
+                Some(gltf::animation::util::ReadOutputs::Rotations(rotations)) => {
+                    use gltf::animation::util::Rotations;
+                    match rotations {
+                        Rotations::F32(iter) => iter.collect(),
+                        other => other.into_f32().collect(),
+                    }
+                }
+                Some(gltf::animation::util::ReadOutputs::Scales(iter)) => {
+                    iter.map(|v| [v[0], v[1], v[2], 0.0]).collect()
+                }
+                Some(gltf::animation::util::ReadOutputs::MorphTargetWeights(_)) => continue,
+                None => continue,
+            };
+
+            if values.len() != times.len() {
+                continue;
+            }
+
+            channels.push(AnimationChannel {
+                node_index: node.index(),
+                path,
+                keyframe_times: times,
+                keyframe_values: values,
+            });
+        }
+
+        if !channels.is_empty() {
+            clips.push(ImportedAnimationClip {
+                name,
+                duration: max_duration,
+                channels,
+            });
+        }
+    }
+
+    clips
 }

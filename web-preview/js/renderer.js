@@ -88,6 +88,11 @@ struct VzglydUniforms {
 @group(0) @binding(5) var s_clamp:             sampler;
 @group(0) @binding(6) var s_repeat:            sampler;
 
+struct VzglydPushConstants {
+    model_matrix: mat4x4<f32>,
+};
+var<push_constant> vzglyd_push: VzglydPushConstants;
+
 fn vzglyd_ambient_light() -> vec3<f32> { return u.ambient_light.rgb; }
 
 fn vzglyd_main_light_dir() -> vec3<f32> {
@@ -153,9 +158,15 @@ const WORLD3D_DEFAULT_BODY = `
 @vertex
 fn vs_main(in: VzglydVertexInput) -> VzglydVertexOutput {
     var out: VzglydVertexOutput;
-    out.clip_pos  = u.view_proj * vec4<f32>(in.position, 1.0);
-    out.world_pos = in.position;
-    out.normal    = normalize(in.normal);
+    let world_pos = (vzglyd_push.model_matrix * vec4<f32>(in.position, 1.0)).xyz;
+    out.clip_pos  = u.view_proj * vec4<f32>(world_pos, 1.0);
+    out.world_pos = world_pos;
+    let normal_mat = mat3x3<f32>(
+        vzglyd_push.model_matrix[0].xyz,
+        vzglyd_push.model_matrix[1].xyz,
+        vzglyd_push.model_matrix[2].xyz,
+    );
+    out.normal    = normalize(normal_mat * in.normal);
     out.color     = in.color;
     out.mode      = in.mode;
     return out;
@@ -532,6 +543,161 @@ function sampleCameraInto(out, cameraPath, elapsed) {
   return copyCameraSample(out, kf[kf.length - 1]);
 }
 
+// ── Animation matrix sampling ──────────────────────────────────────────────
+
+/** Build identity 4x4 matrix as Float32Array(16). */
+function identityMat4() {
+  return new Float32Array([
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ]);
+}
+
+/** Linear interpolation. */
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+/** Sample animation clips at elapsed time, returning per-mesh model matrices. */
+function sampleAnimationMatrices(animations, meshLabels, elapsed) {
+  if (!animations || animations.length === 0) return [];
+
+  const labelToIndex = new Map();
+  meshLabels.forEach((label, i) => labelToIndex.set(label, i));
+  const matrices = meshLabels.map(() => identityMat4());
+
+  for (const clip of animations) {
+    let t = elapsed;
+    if (clip.duration > 0) {
+      if (clip.looped) {
+        t = t % clip.duration;
+      } else {
+        t = Math.min(t, clip.duration);
+      }
+    }
+
+    for (const ch of clip.channels) {
+      const meshIdx = labelToIndex.get(ch.node_label);
+      if (meshIdx === undefined) continue;
+      if (ch.keyframe_times.length < 2) continue;
+
+      // Find keyframe interval
+      let ki = 0;
+      while (ki + 1 < ch.keyframe_times.length && ch.keyframe_times[ki + 1] < t) {
+        ki++;
+      }
+      if (ki + 1 >= ch.keyframe_times.length) ki = ch.keyframe_times.length - 2;
+
+      const t0 = ch.keyframe_times[ki];
+      const t1 = ch.keyframe_times[ki + 1];
+      const span = Math.max(t1 - t0, 0.0001);
+      const lerpT = Math.max(0, Math.min(1, (t - t0) / span));
+
+      const v0 = ch.keyframe_values[ki];
+      const v1 = ch.keyframe_values[ki + 1];
+
+      // Build delta transform and multiply into existing matrix
+      let delta;
+      if (ch.path === 'translation') {
+        const x = lerp(v0[0], v1[0], lerpT);
+        const y = lerp(v0[1], v1[1], lerpT);
+        const z = lerp(v0[2], v1[2], lerpT);
+        delta = makeTranslationMat4(x, y, z);
+      } else if (ch.path === 'rotation') {
+        const q0 = [v0[0], v0[1], v0[2], v0[3]];
+        const q1 = [v1[0], v1[1], v1[2], v1[3]];
+        const q = slerpQuat(q0, q1, lerpT);
+        delta = quatToMat4(q);
+      } else { // scale
+        const x = lerp(v0[0], v1[0], lerpT);
+        const y = lerp(v0[1], v1[1], lerpT);
+        const z = lerp(v0[2], v1[2], lerpT);
+        delta = makeScaleMat4(x, y, z);
+      }
+
+      matrices[meshIdx] = multiplyMat4(delta, matrices[meshIdx]);
+    }
+  }
+
+  return matrices;
+}
+
+function makeTranslationMat4(x, y, z) {
+  return new Float32Array([
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    x, y, z, 1,
+  ]);
+}
+
+function makeScaleMat4(x, y, z) {
+  return new Float32Array([
+    x, 0, 0, 0,
+    0, y, 0, 0,
+    0, 0, z, 0,
+    0, 0, 0, 1,
+  ]);
+}
+
+function quatToMat4(q) {
+  const [x, y, z, w] = q;
+  const x2 = x + x, y2 = y + y, z2 = z + z;
+  const xx = x * x2, xy = x * y2, xz = x * z2;
+  const yy = y * y2, yz = y * z2, zz = z * z2;
+  const wx = w * x2, wy = w * y2, wz = w * z2;
+  return new Float32Array([
+    1 - (yy + zz), xy + wz,        xz - wy,        0,
+    xy - wz,       1 - (xx + zz),  yz + wx,        0,
+    xz + wy,       yz - wx,        1 - (xx + yy),  0,
+    0,             0,              0,              1,
+  ]);
+}
+
+function slerpQuat(q0, q1, t) {
+  // Simple slerp for unit quaternions
+  let cosTheta = q0[0] * q1[0] + q0[1] * q1[1] + q0[2] * q1[2] + q0[3] * q1[3];
+  let q1p = q1;
+  if (cosTheta < 0) {
+    cosTheta = -cosTheta;
+    q1p = [-q1[0], -q1[1], -q1[2], -q1[3]];
+  }
+  if (cosTheta > 0.9995) {
+    // Fall back to lerp
+    const s = 1 - t;
+    const r = [
+      s * q0[0] + t * q1p[0],
+      s * q0[1] + t * q1p[1],
+      s * q0[2] + t * q1p[2],
+      s * q0[3] + t * q1p[3],
+    ];
+    const len = Math.sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3]);
+    return len > 0 ? [r[0] / len, r[1] / len, r[2] / len, r[3] / len] : [0, 0, 0, 1];
+  }
+  const theta = Math.acos(cosTheta);
+  const sinTheta = Math.sin(theta);
+  const s0 = Math.sin((1 - t) * theta) / sinTheta;
+  const s1 = Math.sin(t * theta) / sinTheta;
+  return [
+    s0 * q0[0] + s1 * q1p[0],
+    s0 * q0[1] + s1 * q1p[1],
+    s0 * q0[2] + s1 * q1p[2],
+    s0 * q0[3] + s1 * q1p[3],
+  ];
+}
+
+function multiplyMat4(a, b) {
+  const out = new Float32Array(16);
+  for (let i = 0; i < 4; i++) {
+    for (let j = 0; j < 4; j++) {
+      out[j * 4 + i] = a[i] * b[j * 4] + a[4 + i] * b[j * 4 + 1] + a[8 + i] * b[j * 4 + 2] + a[12 + i] * b[j * 4 + 3];
+    }
+  }
+  return out;
+}
+
 export function computeRenderTimeSeconds(simulationTimeSecs, alpha, fixedStepSecs) {
   const safeSimulationTimeSecs = Number.isFinite(simulationTimeSecs) ? simulationTimeSecs : 0;
   const safeFixedStepSecs = Number.isFinite(fixedStepSecs) ? Math.max(0, fixedStepSecs) : 0;
@@ -806,8 +972,13 @@ function createPipeline(device, bgl, shaderSrc, vertexLayout, pipelineKind, form
     };
   }
 
+  // World3D slides use push constants for per-draw model matrices (64 bytes = mat4x4<f32>)
+  const usePushConstants = sceneSpace === 'World3D';
   const pipelineLayout = device.createPipelineLayout({
     bindGroupLayouts: [bgl],
+    pushConstantRanges: usePushConstants ? [
+      { stages: GPUShaderStage.VERTEX, start: 0, end: 64 },
+    ] : [],
   });
 
   // Screen2D transparent quads always face the camera and should render unconditionally.
@@ -1017,6 +1188,10 @@ export class VzglydRenderer {
     this._fpsLastTime = 0;
     this._fps = 0;
     this._onFps = null; // optional callback(fps)
+
+    // Animation state
+    this._animationElapsed = 0;
+    this._animMatrices = [];  // Float32Array(16) per mesh
 
     // HUD overlay state (populated by initHud / applyHudGeometry)
     this._hudPipeline   = null;
@@ -1686,7 +1861,7 @@ export class VzglydRenderer {
     );
   }
 
-  _renderDrawList(renderPass, pipelines, bindGroup, draws, staticBufs, dynamicBufs = null) {
+  _renderDrawList(renderPass, pipelines, bindGroup, draws, staticBufs, dynamicBufs = null, animMatrices = null) {
     renderPass.setBindGroup(0, bindGroup);
 
     for (const draw of draws) {
@@ -1699,6 +1874,14 @@ export class VzglydRenderer {
         ? staticBufs[index]
         : dynamicBufs?.[index];
       if (!buf) continue;
+
+      // Set model matrix via push constants (World3D only; identity for unanimated)
+      if (animMatrices && kind === 'Static') {
+        const modelMatrix = animMatrices[index] || null;
+        if (modelMatrix) {
+          renderPass.setPushConstants(GPUShaderStage.VERTEX, 0, modelMatrix);
+        }
+      }
 
       renderPass.setVertexBuffer(0, buf.vertex);
       renderPass.setIndexBuffer(buf.index, 'uint16');
@@ -1760,6 +1943,14 @@ export class VzglydRenderer {
     const colorTex = this._context.getCurrentTexture();
     const colorView = colorTex.createView();
 
+    // Advance animation elapsed time
+    this._animationElapsed += frameTiming.fixedStepSecs || (1 / 60);
+
+    // Sample animation matrices for world slides
+    const animMatrices = (spec.scene_space === 'World3D' && spec.animations && spec.animations.length > 0)
+      ? sampleAnimationMatrices(spec.animations, spec.meshes.map(m => m.label), this._animationElapsed)
+      : null;
+
     if (this._backgroundWorld) {
       this._backgroundColorAttachment.view = colorView;
       this._backgroundDepthAttachment.view = this._depthView;
@@ -1779,7 +1970,7 @@ export class VzglydRenderer {
     this._mainDepthAttachment.view = this._depthView;
     const renderPass = encoder.beginRenderPass(this._mainPassDescriptor);
 
-    this._renderDrawList(renderPass, this._pipelines, this._bindGroup, spec.draws, this._staticBufs, this._dynamicBufs);
+    this._renderDrawList(renderPass, this._pipelines, this._bindGroup, spec.draws, this._staticBufs, this._dynamicBufs, animMatrices);
 
     if (this._overlayBuf && this._overlayBuf.indexCount > 0) {
       renderPass.setPipeline(this._pipelines.Transparent);
