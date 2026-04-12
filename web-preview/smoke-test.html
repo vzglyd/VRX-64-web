@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>vrx64 smoke</title>
+  <style>
+    body {
+      margin: 0;
+      background: #000;
+    }
+
+    #c {
+      position: absolute;
+      width: 320px;
+      height: 240px;
+      opacity: 0;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+<canvas id="c" width="320" height="240"></canvas>
+<script type="module">
+  const FFLATE_SOURCES = [
+    '/node_modules/fflate/umd/index.js',
+    'https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js',
+  ];
+
+  function errorText(error) {
+    if (error instanceof Error) {
+      return error.stack || error.message;
+    }
+    return String(error);
+  }
+
+  function fail(error) {
+    window.__vrx64_smoke = { ok: false, error: errorText(error) };
+  }
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = src;
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error(`failed to load ${src}`));
+      document.head.append(script);
+    });
+  }
+
+  async function ensureFflate() {
+    if (globalThis.fflate?.unzipSync) {
+      return;
+    }
+
+    const errors = [];
+    for (const src of FFLATE_SOURCES) {
+      try {
+        await loadScript(src);
+        if (globalThis.fflate?.unzipSync) {
+          return;
+        }
+        errors.push(`${src} loaded without unzipSync`);
+      } catch (error) {
+        errors.push(errorText(error));
+      }
+    }
+
+    throw new Error(`fflate unavailable: ${errors.join('; ')}`);
+  }
+
+  function withTimeout(promise, label, timeoutMs = 10_000) {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  }
+
+  async function run() {
+    await ensureFflate();
+    const { default: init, WebHost } = await withTimeout(
+      import('./pkg/vzglyd_web.js'),
+      'import vzglyd_web.js',
+    );
+    await withTimeout(init(), 'initialize vzglyd_web');
+
+    if (!navigator.gpu) {
+      throw new Error('WebGPU unavailable: navigator.gpu is not defined');
+    }
+
+    const canvas = document.getElementById('c');
+    const host = new WebHost(canvas, null);
+
+    const response = await fetch('./loading.vzglyd', { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`fetch loading.vzglyd: HTTP ${response.status}`);
+    }
+
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    await host.loadBundle(bytes, null);
+
+    for (let frame = 0; frame < 5; frame += 1) {
+      host.frame(frame * 16.67);
+    }
+
+    window.__vrx64_smoke = { ok: true };
+  }
+
+  run().catch(fail);
+</script>
+</body>
+</html>

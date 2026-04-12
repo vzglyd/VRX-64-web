@@ -1,3 +1,4 @@
+// @ts-nocheck
 import {
   TRANSITION_OPTIONS,
   emptyEditableEntry,
@@ -10,13 +11,15 @@ import {
   stringifyPlaylist,
   stringifySecrets,
   toEditablePlaylist,
-} from './js/playlist_repo.js';
+} from '../../js/playlist_repo.js';
 import {
   describeParamField,
   formValuesFromSchemaParams,
   serializeParamsFromFormValues,
-} from './js/param_schema.js';
+} from '../../js/param_schema.js';
 
+
+export function startEditorLegacy() {
 const REPO_STORAGE_KEY = 'vzglyd.shared_repo_url';
 
 const repoForm = document.getElementById('repo-form');
@@ -738,14 +741,6 @@ function renderEntries() {
   }
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('"', '&quot;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
-}
-
 function syncJsonOutput() {
   if (!state.editablePlaylist) {
     state.renderedJson = '';
@@ -1074,3 +1069,4 @@ function boot() {
 }
 
 boot();
+}

@@ -4,6 +4,7 @@
 Cargo.lock
 pkg/
 /web-preview/pkg/
+/web-preview/loading.vzglyd
 
 # Build artifacts
 *.so

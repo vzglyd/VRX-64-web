@@ -4,141 +4,25 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>vzglyd slide root preview</title>
-  <link rel="stylesheet" href="style.css" />
+  <script>
+    if (window.location.pathname.endsWith('/web-preview')) {
+      window.location.replace(`${window.location.pathname}/${window.location.search}${window.location.hash}`);
+    } else {
+      document.write('<link rel="stylesheet" href="style.css" />');
+    }
+  </script>
 </head>
 <body>
-  <div id="app">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">Static slide root preview</p>
-        <h1>vzglyd preview</h1>
-        <p class="subtitle">
-          Connect any static slide root that serves a required <code>playlist.json</code> and
-          repo-root-relative <code>.vzglyd</code> bundles.
-        </p>
-      </div>
-      <div class="hero-actions">
-        <a id="open-player-link" class="ghost-link" href="view.html">Open player</a>
-        <a id="open-editor-link" class="ghost-link" href="editor.html">Open repo editor</a>
-        <a class="ghost-link" href="gpu-test.html">GPU check</a>
-      </div>
-    </header>
-
-    <section class="panel">
-      <div class="panel-head">
-        <div>
-          <h2>Slides repo</h2>
-          <p class="hint">
-            Example base URLs: <code>http://localhost:8081/</code> or
-            <code>https://rodgerbenham.github.io/vzglyd/</code>.
-          </p>
-        </div>
-      </div>
-
-      <form id="repo-form" class="repo-form">
-        <label class="field grow">
-          <span>Repo base URL</span>
-          <input id="repo-url" type="url" placeholder="https://rodgerbenham.github.io/vzglyd/" />
-        </label>
-        <div class="inline-actions">
-          <button class="primary-btn" type="submit">Load playlist</button>
-          <button id="local-bundle-btn" class="secondary-btn" type="button">Load local .vzglyd</button>
-          <input type="file" id="file-input" accept=".vzglyd" hidden />
-        </div>
-      </form>
-
-      <p id="repo-summary" class="support-copy"></p>
-    </section>
-
-    <section id="playlist-shell" class="panel" hidden>
-      <div class="panel-head">
-        <div>
-          <h2>Playlist</h2>
-          <p id="playlist-meta" class="hint"></p>
-        </div>
-      </div>
-      <div id="playlist-empty" class="empty-state" hidden>
-        <strong>No slides</strong>
-        <p>This playlist has no entries yet. Add them from the repo editor.</p>
-      </div>
-      <div id="playlist-list" class="playlist-list"></div>
-    </section>
-
-    <section id="canvas-shell" class="panel" hidden>
-      <div class="panel-head">
-        <div>
-          <p class="eyebrow">Runtime</p>
-          <h2 id="slide-name">No slide loaded</h2>
-          <p id="slide-source" class="hint"></p>
-        </div>
-        <div id="slide-fps" class="fps-readout"></div>
-      </div>
-
-      <canvas id="render-canvas" width="640" height="480"></canvas>
-
-      <div class="inline-actions">
-        <button id="back-btn" class="secondary-btn" type="button">Unload current slide</button>
-        <a id="active-slide-link" class="ghost-link" href="#" hidden>Open bundle URL</a>
-      </div>
-    </section>
-
-    <div id="status-bar" hidden>
-      <div id="status-spinner" class="spinner" hidden></div>
-      <span id="status-text"></span>
-    </div>
-
-    <div id="error-box" hidden>
-      <strong>Error</strong>
-      <pre id="error-text"></pre>
-      <button id="error-dismiss" class="secondary-btn" type="button">Dismiss</button>
-    </div>
-
-    <div id="no-webgpu" hidden>
-      <strong>WebGPU not available</strong>
-      <p id="no-webgpu-detail">
-        This preview requires WebGPU. Try Chrome 113+, Edge 113+, or Safari 18+.
-      </p>
-      <p>
-        On <strong>Linux</strong> (Chrome / Edge) enable the flag and relaunch:<br />
-        <code>edge://flags/#enable-unsafe-webgpu</code> → <strong>Enabled</strong>
-      </p>
-      <p>
-        On <strong>Windows / macOS</strong> make sure hardware acceleration is on:<br />
-        <code>edge://settings/system</code> → <em>Use hardware acceleration when available</em>
-      </p>
-    </div>
-
-    <div id="file-origin-warning" hidden>
-      <strong>Serving over HTTP required</strong>
-      <p>
-        Edge and Chrome block WebGPU on <code>file://</code> pages. Serve this folder over a local
-        HTTP server instead, then open <code>http://localhost:8080/web-preview/</code>.
-      </p>
-      <div class="cmd-list">
-        <div class="cmd-row">
-          <code id="cmd-python">python3 -m http.server 8080</code>
-          <button class="copy-btn" data-target="cmd-python">Copy</button>
-        </div>
-        <div class="cmd-row">
-          <code id="cmd-npx">npx serve . -l 8080</code>
-          <button class="copy-btn" data-target="cmd-npx">Copy</button>
-        </div>
-        <div class="cmd-row">
-          <code id="cmd-cargo">cargo install basic-http-server &amp;&amp; basic-http-server . -a 127.0.0.1:8080</code>
-          <button class="copy-btn" data-target="cmd-cargo">Copy</button>
-        </div>
-      </div>
-      <p class="hint">
-        Serve the slide repo separately as well, then paste that repo base URL into the form above.
-      </p>
-    </div>
-
-    <footer id="help-footer">
-      Shared repo contract: <a href="../docs/shared-slide-repo.md">docs/shared-slide-repo.md</a>
-    </footer>
-  </div>
+  <div id="react-root"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
-  <script type="module" src="app.js"></script>
+  <script>
+    if (!window.location.pathname.endsWith('/web-preview')) {
+      const script = document.createElement('script');
+      script.type = 'module';
+      script.src = 'react/index.js';
+      document.body.append(script);
+    }
+  </script>
 </body>
 </html>

@@ -1,9 +1,12 @@
+// @ts-nocheck
 import {
   describePlaylistEntry,
   fetchBundleFromRepo,
   loadPlaylistFromRepo,
-} from './js/playlist_repo.js';
+} from '../../js/playlist_repo.js';
 
+
+export function startPreviewLegacy() {
 const REPO_STORAGE_KEY = 'vzglyd.shared_repo_url';
 
 const repoForm = document.getElementById('repo-form');
@@ -206,7 +209,7 @@ async function initHost() {
 
   setStatus('Loading engine...', true);
   try {
-    const { default: init, WebHost } = await import('./pkg/vzglyd_web.js');
+    const { default: init, WebHost } = await import(/* @vite-ignore */ new URL('./pkg/vzglyd_web.js', window.location.href).toString());
     await init();
 
     webHost = new WebHost(canvas, {
@@ -474,3 +477,4 @@ async function boot() {
 }
 
 void boot();
+}

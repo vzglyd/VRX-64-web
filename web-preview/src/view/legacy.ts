@@ -1,14 +1,17 @@
+// @ts-nocheck
 import {
   fetchBundleFromRepo,
   loadPlaylistFromRepo,
-} from './js/playlist_repo.js';
+} from '../../js/playlist_repo.js';
 import {
   buildPlayableSchedule,
   nextScheduleIndex,
   normalizeStartIndex,
-} from './js/view_player.js';
-import { syncCanvasToContainer } from './js/canvas_sizing.js';
+} from '../../js/view_player.js';
+import { syncCanvasToContainer } from '../../js/canvas_sizing.js';
 
+
+export function startPlayerLegacy() {
 const REPO_STORAGE_KEY = 'vzglyd.shared_repo_url';
 
 const overlay = document.getElementById('view-overlay');
@@ -249,7 +252,7 @@ function resetPlaybackState() {
 async function ensureRuntime() {
   if (!runtimeModulePromise) {
     runtimeModulePromise = (async () => {
-      const runtime = await import('./pkg/vzglyd_web.js');
+      const runtime = await import(/* @vite-ignore */ new URL('./pkg/vzglyd_web.js', window.location.href).toString());
       await runtime.default();
       WebHostCtor = runtime.WebHost;
     })();
@@ -433,3 +436,4 @@ function boot() {
 }
 
 boot();
+}

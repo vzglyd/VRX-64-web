@@ -555,11 +555,6 @@ function identityMat4() {
   ]);
 }
 
-/** Linear interpolation. */
-function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
-
 /** Sample animation clips at elapsed time, returning per-mesh model matrices. */
 function sampleAnimationMatrices(animations, meshLabels, elapsed) {
   if (!animations || animations.length === 0) return [];
