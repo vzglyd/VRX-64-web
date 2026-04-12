@@ -386,11 +386,36 @@ function describeManifestBadges(entry) {
   if (manifest.display?.duration_seconds != null) badges.push(`bundle ${manifest.display.duration_seconds}s`);
   if (manifest.display?.transition_in) badges.push(`in:${manifest.display.transition_in}`);
   if (manifest.display?.transition_out) badges.push(`out:${manifest.display.transition_out}`);
+  if (manifest.assets?.art) badges.push('cassette art');
   if (manifest.params?.fields?.length) {
     badges.push(`${manifest.params.fields.length} param field${manifest.params.fields.length === 1 ? '' : 's'}`);
   }
 
   return badges;
+}
+
+function buildCassetteArtSummary(manifest) {
+  const art = manifest?.assets?.art;
+  if (!art) return null;
+
+  const shell = document.createElement('div');
+  shell.className = 'cassette-art-summary';
+  const items = [
+    ['J-card', art.j_card],
+    ['Side A', art.side_a_label],
+    ['Side B', art.side_b_label],
+  ];
+  for (const [label, ref] of items) {
+    const item = document.createElement('div');
+    item.className = 'cassette-art-chip';
+    const title = document.createElement('span');
+    title.textContent = label;
+    const path = document.createElement('code');
+    path.textContent = ref.path;
+    item.append(title, path);
+    shell.append(item);
+  }
+  return shell;
 }
 
 function buildManifestSummary(entry) {
@@ -433,6 +458,11 @@ function buildManifestSummary(entry) {
   const description = entry.bundle_manifest.description || entry.bundle_url;
   if (description) {
     shell.append(createFieldNote(description));
+  }
+
+  const cassetteArt = buildCassetteArtSummary(entry.bundle_manifest);
+  if (cassetteArt) {
+    shell.append(cassetteArt);
   }
 
   return shell;

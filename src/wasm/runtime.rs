@@ -48,6 +48,11 @@ extern "C" {
     #[wasm_bindgen(method, js_name = getSlideName)]
     fn get_slide_name(this: &JsEngineBridge) -> JsValue;
 
+    /// Returns the centered HUD update-time text, or `null` if no sidecar
+    /// request has happened.
+    #[wasm_bindgen(method, js_name = getLastUpdatedText)]
+    fn get_last_updated_text(this: &JsEngineBridge) -> JsValue;
+
     /// Initialize the HUD font atlas in the JS renderer.
     ///
     /// `atlas_bytes` is a flat RGBA8 pixel buffer of dimensions
@@ -144,13 +149,16 @@ impl RuntimeBridge {
 
         let slide_name_js = self.inner.get_slide_name();
         let slide_name = slide_name_js.as_string();
+        let updated_js = self.inner.get_last_updated_text();
+        let updated_str = updated_js.as_string();
         let clock_str = hud_clock_str();
-        let (verts, idxs) = vzglyd_kernel::build_hud_geometry(
+        let (verts, idxs) = vzglyd_kernel::build_hud_geometry_with_update(
             &self.glyph_map,
             sw,
             sh,
             slide_name.as_deref(),
             &clock_str,
+            updated_str.as_deref(),
         );
         let verts_bytes = Uint8Array::from(cast_slice::<_, u8>(&verts));
         let idxs_bytes = Uint8Array::from(cast_slice::<_, u8>(&idxs));

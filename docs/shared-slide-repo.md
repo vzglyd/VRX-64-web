@@ -69,6 +69,23 @@ GitHub Pages-style hosting works the same way:
 
 In that case, use `https://rodgerbenham.github.io/vzglyd/` as the repo base URL.
 
+## Required Bundle Artwork
+
+Each `.vzglyd` bundle manifest must declare cassette artwork under `assets.art`.
+The three paths are package-root-relative image files stored inside the archive.
+
+```json
+{
+  "assets": {
+    "art": {
+      "j_card": { "path": "art/j-card.png" },
+      "side_a_label": { "path": "art/side-a.png" },
+      "side_b_label": { "path": "art/side-b.png" }
+    }
+  }
+}
+```
+
 ## Optional Bundle Params Schema
 
 Bundles can advertise editor-friendly params inside their `manifest.json`. When present, the web

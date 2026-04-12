@@ -924,6 +924,7 @@ export class VzglydSidecarHost extends BaseWasmHost {
     this._networkPolicy = options.networkPolicy ?? 'any_https';
     this._endpointMap = options.endpointMap ?? {};
     this._onChannelPush = options.onChannelPush ?? null;
+    this._onNetworkRequest = options.onNetworkRequest ?? null;
     this._onLog = options.onLog ?? null;
     this._lastNetworkResponse = null;
   }
@@ -968,6 +969,14 @@ export class VzglydSidecarHost extends BaseWasmHost {
     }
     this._channelState.latest = bytes;
     this._channelState.dirty = true;
+  }
+
+  _emitNetworkRequest() {
+    const wallClockMs = Date.now();
+    if (this._onNetworkRequest) {
+      this._onNetworkRequest(wallClockMs);
+    }
+    return wallClockMs;
   }
 
   _requestEndpointFor(host, path) {
@@ -1139,6 +1148,7 @@ export class VzglydSidecarHost extends BaseWasmHost {
         try {
           const startedAtMs = traceNowMs();
           const requestBytes = self._readBytes(ptr >>> 0, len >>> 0);
+          self._emitNetworkRequest();
           self._lastNetworkResponse = self._executeNetworkRequest(requestBytes);
           self._traceComplete('host', 'network_request', startedAtMs, {
             request_bytes: requestBytes.length,

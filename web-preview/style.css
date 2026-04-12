@@ -642,6 +642,35 @@ textarea {
   background: rgba(4, 10, 17, 0.46);
 }
 
+.cassette-art-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.cassette-art-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+  border: 1px solid rgba(255, 208, 122, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 208, 122, 0.07);
+  padding: 0.55rem 0.65rem;
+}
+
+.cassette-art-chip span {
+  color: var(--accent-warm);
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.cassette-art-chip code {
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
 .entry-summary-title,
 .entry-params-head h3 {
   margin: 0;

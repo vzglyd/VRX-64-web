@@ -12,6 +12,20 @@ import {
   validatePlaylist,
 } from './playlist_repo.js';
 
+function withCassetteArt(manifest) {
+  return {
+    ...manifest,
+    assets: {
+      ...(manifest.assets ?? {}),
+      art: {
+        j_card: { path: 'art/j-card.png' },
+        side_a_label: { path: 'art/side-a.png' },
+        side_b_label: { path: 'art/side-b.png' },
+      },
+    },
+  };
+}
+
 test('normalizes repo URLs to a trailing slash', () => {
   assert.equal(
     normalizeRepoBaseUrl('http://localhost:8081/shared'),
@@ -72,24 +86,29 @@ test('loads bundle manifest metadata relative to the repo root', async () => {
       }),
       unzipSyncImpl: () => ({
         'manifest.json': new TextEncoder().encode(JSON.stringify({
-          name: 'Headlines',
-          description: 'Morning edition',
-          display: { duration_seconds: 12 },
-          params: {
-            fields: [
-              {
-                key: 'edition',
-                type: 'string',
-                default: 'morning',
-                options: [
-                  { value: 'morning', label: 'Morning' },
-                  { value: 'evening', label: 'Evening' },
-                ],
-              },
-            ],
-          },
+          ...withCassetteArt({
+            name: 'Headlines',
+            description: 'Morning edition',
+            display: { duration_seconds: 12 },
+            params: {
+              fields: [
+                {
+                  key: 'edition',
+                  type: 'string',
+                  default: 'morning',
+                  options: [
+                    { value: 'morning', label: 'Morning' },
+                    { value: 'evening', label: 'Evening' },
+                  ],
+                },
+              ],
+            },
+          }),
         })),
         'slide.wasm': new Uint8Array([0, 97, 115, 109]),
+        'art/j-card.png': new Uint8Array([137, 80, 78, 71]),
+        'art/side-a.png': new Uint8Array([137, 80, 78, 71]),
+        'art/side-b.png': new Uint8Array([137, 80, 78, 71]),
       }),
     },
   );

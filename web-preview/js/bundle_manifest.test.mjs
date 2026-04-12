@@ -12,10 +12,24 @@ function archive(entries) {
   );
 }
 
+function withCassetteArt(manifest) {
+  return {
+    ...manifest,
+    assets: {
+      ...(manifest.assets ?? {}),
+      art: {
+        j_card: { path: 'art/j-card.png' },
+        side_a_label: { path: 'art/side-a.png' },
+        side_b_label: { path: 'art/side-b.png' },
+      },
+    },
+  };
+}
+
 test('extracts and normalizes manifest metadata from a bundle archive', () => {
   const manifest = extractBundleManifest(new Uint8Array([1, 2, 3]), {
     unzipSyncImpl: archive({
-      'manifest.json': JSON.stringify({
+      'manifest.json': JSON.stringify(withCassetteArt({
         name: 'Headlines',
         display: { duration_seconds: '12', transition_in: 'crossfade' },
         params: {
@@ -31,8 +45,11 @@ test('extracts and normalizes manifest metadata from a bundle archive', () => {
             },
           ],
         },
-      }),
+      })),
       'slide.wasm': new Uint8Array([0, 97, 115, 109]),
+      'art/j-card.png': new Uint8Array([137, 80, 78, 71]),
+      'art/side-a.png': new Uint8Array([137, 80, 78, 71]),
+      'art/side-b.png': new Uint8Array([137, 80, 78, 71]),
     }),
   });
 
@@ -44,8 +61,11 @@ test('extracts and normalizes manifest metadata from a bundle archive', () => {
 test('unpackBundle keeps non-manifest assets available for runtime use', () => {
   const bundle = unpackBundle(new Uint8Array([1, 2, 3]), {
     unzipSyncImpl: archive({
-      'manifest.json': JSON.stringify({ name: 'Clock' }),
+      'manifest.json': JSON.stringify(withCassetteArt({ name: 'Clock' })),
       'slide.wasm': new Uint8Array([0, 97, 115, 109]),
+      'art/j-card.png': new Uint8Array([137, 80, 78, 71]),
+      'art/side-a.png': new Uint8Array([137, 80, 78, 71]),
+      'art/side-b.png': new Uint8Array([137, 80, 78, 71]),
       'assets/logo.png': new Uint8Array([137, 80, 78, 71]),
     }),
   });
@@ -59,16 +79,31 @@ test('rejects invalid advertised param schemas', () => {
   assert.throws(
     () => extractBundleManifest(new Uint8Array([1, 2, 3]), {
       unzipSyncImpl: archive({
-        'manifest.json': JSON.stringify({
+        'manifest.json': JSON.stringify(withCassetteArt({
           params: {
             fields: [
               { key: 'payload', type: 'json', options: [{ value: { mode: 'demo' } }] },
             ],
           },
-        }),
+        })),
         'slide.wasm': new Uint8Array([0, 97, 115, 109]),
+        'art/j-card.png': new Uint8Array([137, 80, 78, 71]),
+        'art/side-a.png': new Uint8Array([137, 80, 78, 71]),
+        'art/side-b.png': new Uint8Array([137, 80, 78, 71]),
       }),
     }),
     /not supported for json fields/,
+  );
+});
+
+test('rejects bundles without cassette art metadata', () => {
+  assert.throws(
+    () => extractBundleManifest(new Uint8Array([1, 2, 3]), {
+      unzipSyncImpl: archive({
+        'manifest.json': JSON.stringify({ name: 'Clock' }),
+        'slide.wasm': new Uint8Array([0, 97, 115, 109]),
+      }),
+    }),
+    /manifest\.assets\.art is required/,
   );
 });

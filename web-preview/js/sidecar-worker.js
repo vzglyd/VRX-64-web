@@ -29,6 +29,9 @@ self.onmessage = async (event) => {
       onChannelPush(bytes) {
         self.postMessage({ type: 'channel_push', bytes }, [bytes.buffer]);
       },
+      onNetworkRequest(wallClockMs) {
+        self.postMessage({ type: 'network_request', wallClockMs });
+      },
       onLog(message) {
         self.postMessage({ type: 'log', message });
       },

@@ -25,6 +25,14 @@ function nowMs() {
   return performance.now();
 }
 
+function formatLastUpdatedText(wallClockMs) {
+  if (!Number.isFinite(wallClockMs)) return null;
+  const date = new Date(wallClockMs);
+  if (Number.isNaN(date.getTime())) return null;
+  const pad = (value) => String(value).padStart(2, '0');
+  return `UPDATED ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 function measureCall(fn) {
   const startMs = nowMs();
   const result = fn();
@@ -128,6 +136,7 @@ class SidecarWorkerRuntime {
     this._endpointMap = options.endpointMap ?? {};
     this._traceThread = options.traceThread ?? 'sidecar:guest';
     this._onTrace = options.onTrace ?? null;
+    this._onNetworkRequest = options.onNetworkRequest ?? null;
     this._worker = null;
   }
 
@@ -200,6 +209,10 @@ class SidecarWorkerRuntime {
       this._channelState.dirty = true;
       return;
     }
+    if (data.type === 'network_request') {
+      this._onNetworkRequest?.(Number(data.wallClockMs));
+      return;
+    }
     if (data.type === 'log') {
       console.log('[vzglyd][sidecar]', data.message);
       return;
@@ -252,6 +265,7 @@ export class EngineBridge {
     this._slideTraceThread = 'web.main';
     this._slideTraceArgs = {};
     this._sidecarTraceThread = 'web.sidecar';
+    this._lastNetworkRequestWallClockMs = null;
     this._frameScheduler = createFixedStepScheduler();
     this._frameTiming = {};
     this._frameSample = {};
@@ -596,6 +610,9 @@ export class EngineBridge {
           endpointMap: this._hostConfig?.sidecarEndpoints ?? {},
           traceThread: slideTrace.sidecarThread,
           onTrace: (event) => this._relayWorkerTrace(event),
+          onNetworkRequest: (wallClockMs) => {
+            this._lastNetworkRequestWallClockMs = wallClockMs;
+          },
         });
         this._channelState.active = true;
         await sidecarHost.start(pkg.sidecarWasm.slice(), paramsBytes ? paramsBytes.slice() : null);
@@ -966,6 +983,7 @@ export class EngineBridge {
     this._slideTraceThread = 'web.main';
     this._slideTraceArgs = {};
     this._sidecarTraceThread = 'web.sidecar';
+    this._lastNetworkRequestWallClockMs = null;
     this._timingDiagnostics = {
       clampCount: 0,
       multiStepFrameCount: 0,
@@ -1027,6 +1045,11 @@ export class EngineBridge {
   /** Returns the current slide name, or null when nothing is loaded. */
   getSlideName() {
     return this._slideName || null;
+  }
+
+  /** Returns the latest sidecar host-request time for the centered footer HUD. */
+  getLastUpdatedText() {
+    return formatLastUpdatedText(this._lastNetworkRequestWallClockMs);
   }
 
   /**

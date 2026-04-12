@@ -99,4 +99,5 @@ The full contract and example layout live in [`docs/shared-slide-repo.md`](docs/
 - Current browser backend is WebGPU only.
 - `.vzglyd` archives are expected to contain `manifest.json` and `slide.wasm`.
 - Optional `sidecar.wasm` is loaded when present.
+- Bundles must declare cassette artwork in `manifest.json -> assets.art` with J-card, side A label, and side B label image paths.
 - Bundles can advertise editor-friendly parameter schemas in `manifest.json -> params.fields`.

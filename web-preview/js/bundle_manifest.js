@@ -50,6 +50,62 @@ function parseManifest(manifestBytes) {
   return JSON.parse(manifestJson);
 }
 
+function normalizePackagePath(path, label) {
+  if (typeof path !== 'string' || path.trim() === '') {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  const trimmed = path.trim();
+  if (trimmed.startsWith('/')) {
+    throw new Error(`${label} must be relative to the package root`);
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+    throw new Error(`${label} must not be an absolute URL`);
+  }
+  if (trimmed.includes('\\')) {
+    throw new Error(`${label} must use forward slashes`);
+  }
+  if (trimmed.split('/').some((segment) => segment === '.' || segment === '..')) {
+    throw new Error(`${label} must not contain '.' or '..' path segments`);
+  }
+  return trimmed;
+}
+
+function normalizeArtRef(ref, label) {
+  if (!isPlainObject(ref)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const normalized = { ...ref, path: normalizePackagePath(ref.path, `${label}.path`) };
+  if (ref.label != null) {
+    if (typeof ref.label !== 'string' || ref.label.trim() === '') {
+      throw new Error(`${label}.label must be a non-empty string`);
+    }
+    normalized.label = ref.label.trim();
+  }
+  return normalized;
+}
+
+function normalizeCassetteArt(art, label) {
+  if (!isPlainObject(art)) {
+    throw new Error(`${label} is required`);
+  }
+  return {
+    ...art,
+    j_card: normalizeArtRef(art.j_card, `${label}.j_card`),
+    side_a_label: normalizeArtRef(art.side_a_label, `${label}.side_a_label`),
+    side_b_label: normalizeArtRef(art.side_b_label, `${label}.side_b_label`),
+  };
+}
+
+function normalizeAssetsConfig(assets, label) {
+  if (!isPlainObject(assets)) {
+    throw new Error(`${label}.art is required`);
+  }
+  return {
+    ...assets,
+    art: normalizeCassetteArt(assets.art, `${label}.art`),
+  };
+}
+
 function normalizeDisplayConfig(display, label) {
   if (display == null) {
     return undefined;
@@ -93,6 +149,8 @@ export function normalizeBundleManifest(manifest, label = 'manifest') {
   if (manifest.scene_space && !['screen_2d', 'world_3d'].includes(manifest.scene_space)) {
     throw new Error(`${label}.scene_space '${manifest.scene_space}' is unsupported`);
   }
+
+  normalized.assets = normalizeAssetsConfig(manifest.assets, `${label}.assets`);
 
   if (manifest.display !== undefined) {
     normalized.display = normalizeDisplayConfig(manifest.display, `${label}.display`);
